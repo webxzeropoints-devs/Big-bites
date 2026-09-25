@@ -1,13 +1,9 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
+
 import 'package:http/http.dart' as http;
 
 class ApiService {
-  // Android Emulator uses 10.0.2.2; desktop apps use the PC's localhost.
-  static String get baseUrl =>
-      defaultTargetPlatform == TargetPlatform.android
-          ? 'http://10.0.2.2:3000'
-          : 'http://localhost:3000';
+  static String get baseUrl => 'https://big-bites-server.onrender.com';
 
   static Future<Map<String, dynamic>> login(
     String username,
@@ -15,32 +11,24 @@ class ApiService {
   ) async {
     final response = await http.post(
       Uri.parse('$baseUrl/api/auth/login'),
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode({
-        'username': username,
-        'password': password,
-      }),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'username': username, 'password': password}),
     );
 
     final data = jsonDecode(response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception(data is Map && data['message'] is String
-          ? data['message']
-          : 'Login failed with status ${response.statusCode}');
+      throw Exception(
+        data is Map && data['message'] is String
+            ? data['message']
+            : 'Login failed with status ${response.statusCode}',
+      );
     }
 
-    return {
-      'statusCode': response.statusCode,
-      'data': data,
-    };
+    return {'statusCode': response.statusCode, 'data': data};
   }
 
   static Future<List<dynamic>> getTables() async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/api/tables'),
-    );
+    final response = await http.get(Uri.parse('$baseUrl/api/tables'));
 
     if (response.statusCode != 200) {
       throw Exception(
@@ -58,8 +46,7 @@ class ApiService {
       if (table is! Map ||
           table['id'] is! num ||
           table['status'] is! String ||
-          !['AVAILABLE', 'OCCUPIED', 'RESERVED']
-              .contains(table['status'])) {
+          !['AVAILABLE', 'OCCUPIED', 'RESERVED'].contains(table['status'])) {
         throw Exception('The server returned an invalid table status');
       }
     }
@@ -68,9 +55,7 @@ class ApiService {
   }
 
   static Future<List<dynamic>> getProducts() async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/api/products'),
-    );
+    final response = await http.get(Uri.parse('$baseUrl/api/products'));
 
     if (response.statusCode != 200) {
       throw Exception('Failed to load products');
