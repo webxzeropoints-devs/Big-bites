@@ -1,0 +1,25 @@
+# Dependencies and generated output
+**/node_modules/
+**/.dart_tool/
+**/build/
+**/dist/
+**/.widget_preview/
+**/target/
+
+# Environment and local secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# IDE and OS files
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.iml
+.DS_Store
+Thumbs.db
+
+# Flutter generated files
+**/ios/Flutter/ephemeral/
+**/macos/Flutter/ephemeral/
+**/windows/flutter/ephemeral/
