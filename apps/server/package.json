@@ -6,7 +6,9 @@
   "scripts": {
     "test": "tsc --noEmit",
     "postinstall": "prisma skills sync || exit 0",
-    "dev": "tsx watch src/server.ts"
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
   },
   "keywords": [],
   "type": "commonjs",
