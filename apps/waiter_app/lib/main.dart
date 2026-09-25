@@ -264,7 +264,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             crossAxisCount: 2,
                             crossAxisSpacing: 15,
                             mainAxisSpacing: 15,
-                            childAspectRatio: 1.2,
+                            childAspectRatio: 1.05,
                           ),
                       itemBuilder: (context, index) {
                         final table = tables[index];

@@ -217,6 +217,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .modal-header h3 { margin: 0; font-size: 20px; }
 .icon-btn { border: 0; background: transparent; color: #70767c; font-size: 25px; }
 .product-form { display: grid; gap: 15px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .switch-row { display: flex; align-items: center; justify-content: space-between; align-self: end; min-height: 40px; color: #666b72; font-size: 12px; font-weight: 700; }
 .toggle-btn { width: 44px; height: 24px; padding: 3px; border: 0; border-radius: 999px; background: #c9c6c1; text-align: left; }

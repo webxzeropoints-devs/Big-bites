@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import "./App.css";
 
-const API_URL = "http://localhost:3000";
+const API_URL = "https://big-bites-server.onrender.com";
 
 type Screen = "billing" | "admin";
 type User = { id: number; name: string; username: string; role: string };
@@ -591,7 +591,7 @@ function BillingScreen({ token }: { token: string }) {
 }
 
 function AdminScreen({ token }: { token: string }) {
-  const [activeTab, setActiveTab] = useState<"overview" | "products" | "tables" | "orders" | "payments">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "products" | "tables" | "orders" | "payments" | "waiters" | "staff">("overview");
   const [dashboard, setDashboard] = useState<Dashboard>({
     openOrders: 0,
     completedOrders: 0,
@@ -607,11 +607,18 @@ function AdminScreen({ token }: { token: string }) {
   const [tables, setTables] = useState<Table[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [payments, setPayments] = useState<any[]>([]);
+  const [staffUsers, setStaffUsers] = useState<User[]>([]);
+  const [waiters, setWaiters] = useState<User[]>([]);
+  const [waiterError, setWaiterError] = useState("");
+  const [waitersLoading, setWaitersLoading] = useState(false);
   const [error, setError] = useState("");
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [tableModalOpen, setTableModalOpen] = useState(false);
+  const [waiterModalOpen, setWaiterModalOpen] = useState(false);
   const [tableNumber, setTableNumber] = useState("");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editingWaiter, setEditingWaiter] = useState<User | null>(null);
+  const [waiterForm, setWaiterForm] = useState({ name: "", username: "", password: "" });
   const [productForm, setProductForm] = useState({
     name: "",
     categoryId: "",
@@ -644,9 +651,27 @@ function AdminScreen({ token }: { token: string }) {
     }
   };
 
+  const loadUsers = async () => {
+    setWaitersLoading(true);
+    try {
+      const users: User[] = await request("/api/admin/users", {}, token);
+      setStaffUsers(users);
+      setWaiters(users.filter((user) => user.role === "WAITER"));
+      setWaiterError("");
+    } catch (err) {
+      setWaiterError(err instanceof Error ? err.message : "Unable to load users");
+    } finally {
+      setWaitersLoading(false);
+    }
+  };
+
   useEffect(() => {
     void load();
   }, [token]);
+
+  useEffect(() => {
+    if (activeTab === "waiters" || activeTab === "staff") void loadUsers();
+  }, [activeTab, token]);
 
   const categoryOptions = useMemo(
     () => categories.map((category) => ({ value: String(category.id), label: category.name })),
@@ -753,6 +778,60 @@ function AdminScreen({ token }: { token: string }) {
     }
   };
 
+  const openCreateWaiter = () => {
+    setEditingWaiter(null);
+    setWaiterForm({ name: "", username: "", password: "" });
+    setWaiterError("");
+    setWaiterModalOpen(true);
+  };
+
+  const openEditUser = (user: User) => {
+    setEditingWaiter(user);
+    setWaiterForm({ name: user.name, username: user.username, password: "" });
+    setWaiterError("");
+    setWaiterModalOpen(true);
+  };
+
+  const closeWaiterModal = () => {
+    setWaiterModalOpen(false);
+    setEditingWaiter(null);
+    setWaiterForm({ name: "", username: "", password: "" });
+    setWaiterError("");
+  };
+
+  const saveWaiter = async (event: FormEvent) => {
+    event.preventDefault();
+    setWaiterError("");
+
+    const payload = editingWaiter
+      ? {
+          name: waiterForm.name.trim(),
+          username: waiterForm.username.trim(),
+          ...(waiterForm.password ? { password: waiterForm.password } : {}),
+        }
+      : {
+          name: waiterForm.name.trim(),
+          username: waiterForm.username.trim(),
+          password: waiterForm.password,
+          role: "WAITER",
+        };
+
+    try {
+      await request(
+        editingWaiter ? `/api/admin/users/${editingWaiter.id}` : "/api/admin/users",
+        {
+          method: editingWaiter ? "PATCH" : "POST",
+          body: JSON.stringify(payload),
+        },
+        token,
+      );
+      closeWaiterModal();
+      await loadUsers();
+    } catch (err) {
+      setWaiterError(err instanceof Error ? err.message : "Unable to save waiter");
+    }
+  };
+
   return (
     <main className="content-shell">
       <div className="page-header admin-header">
@@ -790,6 +869,12 @@ function AdminScreen({ token }: { token: string }) {
             </button>
             <button className={activeTab === "payments" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("payments")}>
               <span className="nav-icon">₹</span> Payments
+            </button>
+            <button className={activeTab === "waiters" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("waiters")}>
+              <span className="nav-icon">♙</span> Waiters
+            </button>
+            <button className={activeTab === "staff" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("staff")}>
+              <span className="nav-icon">♟</span> Staff Management
             </button>
           </div>
         </aside>
@@ -1002,6 +1087,109 @@ function AdminScreen({ token }: { token: string }) {
               </div>
             </section>
           )}
+
+          {activeTab === "waiters" && (
+            <section className="panel product-panel">
+              <div className="panel-heading">
+                <div>
+                  <div className="eyebrow">Team access</div>
+                  <h3>Waiter management</h3>
+                </div>
+                <button className="primary-btn" onClick={openCreateWaiter}>
+                  + Add Waiter
+                </button>
+              </div>
+
+              {waiterError && !waiterModalOpen && <div className="error-banner">{waiterError}</div>}
+
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Username</th>
+                      <th>Role</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {waiters.map((waiter) => (
+                      <tr key={waiter.id}>
+                        <td><strong>{waiter.name}</strong></td>
+                        <td>{waiter.username}</td>
+                        <td><span className="pill neutral">{waiter.role}</span></td>
+                        <td>
+                          <div className="table-actions">
+                            <button className="secondary-btn small" onClick={() => openEditUser(waiter)}>
+                              Edit
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {!waitersLoading && waiters.length === 0 && !waiterError && (
+                <div className="empty-state">
+                  <h4>No waiters yet</h4>
+                  <span>Add a waiter to give them access to the waiter app.</span>
+                </div>
+              )}
+              {waitersLoading && <p className="page-subtitle">Loading waiters...</p>}
+            </section>
+          )}
+
+          {activeTab === "staff" && (
+            <section className="panel product-panel">
+              <div className="panel-heading">
+                <div>
+                  <div className="eyebrow">Team access</div>
+                  <h3>User management</h3>
+                  <p className="page-subtitle">Manage login credentials for all staff roles.</p>
+                </div>
+              </div>
+
+              {waiterError && <div className="error-banner">{waiterError}</div>}
+
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Username</th>
+                      <th>Role</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {staffUsers.map((staffUser) => (
+                      <tr key={staffUser.id}>
+                        <td><strong>{staffUser.name}</strong></td>
+                        <td>{staffUser.username}</td>
+                        <td><span className="pill neutral">{staffUser.role}</span></td>
+                        <td>
+                          <div className="table-actions">
+                            <button className="secondary-btn small" onClick={() => openEditUser(staffUser)}>
+                              Edit
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {!waitersLoading && staffUsers.length === 0 && !waiterError && (
+                <div className="empty-state">
+                  <h4>No staff users found</h4>
+                </div>
+              )}
+              {waitersLoading && <p className="page-subtitle">Loading users...</p>}
+            </section>
+          )}
         </div>
       </div>
 
@@ -1127,6 +1315,81 @@ function AdminScreen({ token }: { token: string }) {
                 </button>
                 <button type="submit" className="primary-btn">
                   Create table
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {waiterModalOpen && (
+        <div className="modal-backdrop" onClick={closeWaiterModal}>
+          <div className="modal-card compact-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <div className="eyebrow">Team access</div>
+                <h3>{editingWaiter ? "Edit staff user" : "Add waiter"}</h3>
+              </div>
+              <button className="icon-btn" onClick={closeWaiterModal} aria-label="Close waiter form">
+                ×
+              </button>
+            </div>
+
+            {waiterError && <div className="error-banner">{waiterError}</div>}
+
+            <form className="product-form" onSubmit={saveWaiter}>
+              <label>
+                Name
+                <input
+                  value={waiterForm.name}
+                  onChange={(event) => setWaiterForm((current) => ({ ...current, name: event.target.value }))}
+                  autoComplete="name"
+                  required
+                />
+              </label>
+
+              {!editingWaiter && (
+                <label>
+                  Username
+                  <input
+                    value={waiterForm.username}
+                    onChange={(event) => setWaiterForm((current) => ({ ...current, username: event.target.value }))}
+                    autoComplete="username"
+                    required
+                  />
+                </label>
+              )}
+
+              {editingWaiter && (
+                <label>
+                  Username
+                  <input
+                    value={waiterForm.username}
+                    onChange={(event) => setWaiterForm((current) => ({ ...current, username: event.target.value }))}
+                    autoComplete="username"
+                    required
+                  />
+                </label>
+              )}
+
+              <label>
+                Password{editingWaiter ? " (optional)" : ""}
+                <input
+                  type="password"
+                  value={waiterForm.password}
+                  onChange={(event) => setWaiterForm((current) => ({ ...current, password: event.target.value }))}
+                  autoComplete="new-password"
+                  placeholder={editingWaiter ? "Leave blank to keep the current password" : ""}
+                  required={!editingWaiter}
+                />
+              </label>
+
+              <div className="modal-actions">
+                <button type="button" className="secondary-btn" onClick={closeWaiterModal}>
+                  Cancel
+                </button>
+                <button type="submit" className="primary-btn">
+                  {editingWaiter ? "Save changes" : "Create waiter"}
                 </button>
               </div>
             </form>

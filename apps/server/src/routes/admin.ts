@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
 
@@ -43,9 +44,27 @@ router.post("/users", async (req, res) => {
 });
 router.patch("/users/:id", async (req, res) => {
   const userId = id(req.params.id); if (!userId) return res.status(400).json({ message: "Invalid user ID" });
-  const data: Record<string, unknown> = {}; if (text(req.body.name)) data.name = text(req.body.name); if (text(req.body.password)) data.password = text(req.body.password); if (["ADMIN", "MANAGER", "CASHIER", "WAITER"].includes(req.body.role)) data.role = req.body.role;
+  const data: Record<string, unknown> = {};
+  if (text(req.body.name)) data.name = text(req.body.name);
+  if (req.body.username !== undefined) {
+    const username = text(req.body.username);
+    if (!username) return res.status(400).json({ message: "A valid username is required" });
+    data.username = username;
+  }
+  if (text(req.body.password)) data.password = text(req.body.password);
+  if (["ADMIN", "MANAGER", "CASHIER", "WAITER"].includes(req.body.role)) data.role = req.body.role;
   if (!Object.keys(data).length) return res.status(400).json({ message: "No valid changes" });
-  try { res.json(await prisma.user.update({ where: { id: userId }, data, select: safeUser })); } catch { res.status(404).json({ message: "User not found" }); }
+  try {
+    res.json(await prisma.user.update({ where: { id: userId }, data, select: safeUser }));
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return res.status(409).json({ message: "Username already exists" });
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+      return res.status(404).json({ message: "User not found" });
+    }
+    throw error;
+  }
 });
 
 router.get("/categories", async (_req, res) => res.json(await prisma.category.findMany({ include: { _count: { select: { products: true } } }, orderBy: { name: "asc" } })));
