@@ -284,6 +284,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     MaterialPageRoute(
                                       builder: (context) => MenuScreen(
                                         tableId: tableId,
+                                        tableNumber: table['number'] as int,
                                         waiterId: widget.user['id'],
                                         token: widget.token,
                                         isParcel: isParcel,
@@ -361,6 +362,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class MenuScreen extends StatefulWidget {
   final int tableId;
+  final int tableNumber;
   final int waiterId;
   final String token;
   final bool isParcel;
@@ -368,6 +370,7 @@ class MenuScreen extends StatefulWidget {
   const MenuScreen({
     super.key,
     required this.tableId,
+    required this.tableNumber,
     required this.waiterId,
     required this.token,
     required this.isParcel,
@@ -493,7 +496,7 @@ class _MenuScreenState extends State<MenuScreen> {
             return AlertDialog(
               title: const Text('Order Confirmed'),
               content: Text(
-                '${widget.isParcel ? 'Parcel' : 'Table ${widget.tableId}'}\n'
+                '${widget.isParcel ? 'Parcel' : 'Table ${widget.tableNumber}'}\n'
                 'Items: $selectedItemCount\n'
                 'Total: ₹${total.toStringAsFixed(0)}',
               ),
@@ -536,7 +539,7 @@ class _MenuScreenState extends State<MenuScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          '${widget.isParcel ? 'Parcel' : 'Table ${widget.tableId}'} - Menu',
+          '${widget.isParcel ? 'Parcel' : 'Table ${widget.tableNumber}'} - Menu',
         ),
       ),
 
@@ -702,3 +705,5 @@ class _MenuScreenState extends State<MenuScreen> {
     );
   }
 }
+
+
