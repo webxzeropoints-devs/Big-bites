@@ -13,15 +13,19 @@ const safeWaiterSelect = {
   updatedAt: true,
 };
 
+// ============================================================
 // POST /api/orders
-// Create a new order
+// Always create a NEW order.
+// Multiple orders are allowed for the same table.
+// ============================================================
+
 router.post("/", requireRoles("WAITER"), async (req, res) => {
   try {
     const { tableId, waiterId, items } = req.body;
+
     const parsedTableId = Number(tableId);
     const parsedWaiterId = Number(waiterId);
 
-    // Validate basic data
     if (
       !Number.isInteger(parsedTableId) ||
       parsedTableId <= 0 ||
@@ -35,9 +39,10 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
       });
     }
 
-    // Check table
     const table = await prisma.restaurantTable.findUnique({
-      where: { id: parsedTableId },
+      where: {
+        id: parsedTableId,
+      },
     });
 
     if (!table) {
@@ -46,9 +51,10 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
       });
     }
 
-    // Check waiter
     const waiter = await prisma.user.findUnique({
-      where: { id: parsedWaiterId },
+      where: {
+        id: parsedWaiterId,
+      },
     });
 
     if (!waiter || waiter.role !== "WAITER") {
@@ -92,10 +98,7 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
       );
     }
 
-    let total = 0;
-
-    // Validate products and calculate total
-    const orderItems: {
+    const newItems: {
       productId: number;
       quantity: number;
       unitPrice: number;
@@ -104,7 +107,9 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
 
     for (const [productId, quantity] of productQuantities.entries()) {
       const product = await prisma.product.findUnique({
-        where: { id: productId },
+        where: {
+          id: productId,
+        },
       });
 
       if (!product || !product.isActive) {
@@ -122,9 +127,7 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
       const unitPrice = Number(product.price);
       const subtotal = unitPrice * quantity;
 
-      total += subtotal;
-
-      orderItems.push({
+      newItems.push({
         productId,
         quantity,
         unitPrice,
@@ -132,16 +135,20 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
       });
     }
 
-    // Create order and update inventory
-    const order = await prisma.$transaction(async (tx) => {
-      const newOrder = await tx.order.create({
+    const total = newItems.reduce(
+      (sum, item) => sum + item.subtotal,
+      0,
+    );
+
+    const result = await prisma.$transaction(async (tx) => {
+      const order = await tx.order.create({
         data: {
           tableId: parsedTableId,
           waiterId: parsedWaiterId,
           status: "CONFIRMED",
           total,
           items: {
-            create: orderItems,
+            create: newItems,
           },
         },
         include: {
@@ -154,13 +161,15 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
           waiter: {
             select: safeWaiterSelect,
           },
+          payment: true,
         },
       });
 
-      // Reduce product stock
-      for (const item of orderItems) {
+      for (const item of newItems) {
         await tx.product.update({
-          where: { id: item.productId },
+          where: {
+            id: item.productId,
+          },
           data: {
             stock: {
               decrement: item.quantity,
@@ -169,104 +178,196 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
         });
       }
 
-      // Mark table as occupied
       await tx.restaurantTable.update({
-        where: { id: parsedTableId },
+        where: {
+          id: parsedTableId,
+        },
         data: {
           status: "OCCUPIED",
         },
       });
 
-      return newOrder;
+      return order;
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       message: "Order created successfully",
-      order,
+      order: result,
     });
   } catch (error) {
     console.error("Create order error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Failed to create order",
     });
   }
 });
 
+// ============================================================
+// GET /api/orders/table/:tableId
+// Get ALL orders belonging to one table.
+//
+// This allows the waiter to see:
+// Order #1
+// Order #2
+// Order #3
+// etc.
+//
+// Orders are returned oldest first.
+// ============================================================
+
+router.get(
+  "/table/:tableId",
+  requireRoles("WAITER"),
+  async (req, res) => {
+    try {
+      const tableId = Number(req.params.tableId);
+
+      if (!Number.isInteger(tableId) || tableId <= 0) {
+        return res.status(400).json({
+          message: "Invalid table ID",
+        });
+      }
+
+      const table = await prisma.restaurantTable.findUnique({
+        where: {
+          id: tableId,
+        },
+      });
+
+      if (!table) {
+        return res.status(404).json({
+          message: "Table not found",
+        });
+      }
+
+      const orders = await prisma.order.findMany({
+        where: {
+          tableId,
+          status: {
+            not: "CANCELLED",
+          },
+        },
+        include: {
+          items: {
+            include: {
+              product: true,
+            },
+          },
+          table: true,
+          waiter: {
+            select: safeWaiterSelect,
+          },
+          payment: true,
+        },
+        orderBy: {
+          createdAt: "asc",
+        },
+      });
+
+      return res.json(orders);
+    } catch (error) {
+      console.error("Fetch table orders error:", error);
+
+      return res.status(500).json({
+        message: "Failed to fetch table orders",
+      });
+    }
+  },
+);
+
+// ============================================================
 // GET /api/orders
-// Get all orders
-router.get("/", requireRoles("ADMIN", "MANAGER", "CASHIER"), async (req, res) => {
-  try {
-    const orders = await prisma.order.findMany({
-      include: {
-        items: {
-          include: {
-            product: true,
+// Get all orders.
+// Admin / Manager / Cashier only.
+// ============================================================
+
+router.get(
+  "/",
+  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  async (req, res) => {
+    try {
+      const orders = await prisma.order.findMany({
+        include: {
+          items: {
+            include: {
+              product: true,
+            },
           },
+          table: true,
+          waiter: {
+            select: safeWaiterSelect,
+          },
+          payment: true,
         },
-        table: true,
-        waiter: {
-          select: safeWaiterSelect,
+        orderBy: {
+          createdAt: "desc",
         },
-        payment: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+      });
 
-    res.json(orders);
-  } catch (error) {
-    console.error("Fetch orders error:", error);
+      return res.json(orders);
+    } catch (error) {
+      console.error("Fetch orders error:", error);
 
-    res.status(500).json({
-      message: "Failed to fetch orders",
-    });
-  }
-});
+      return res.status(500).json({
+        message: "Failed to fetch orders",
+      });
+    }
+  },
+);
 
+// ============================================================
 // GET /api/orders/:id
-// Get one order
-router.get("/:id", requireRoles("ADMIN", "MANAGER", "CASHIER"), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
+// Get one specific order.
+// Admin / Manager / Cashier only.
+// ============================================================
 
-    if (isNaN(id)) {
-      return res.status(400).json({
-        message: "Invalid order ID",
-      });
-    }
+router.get(
+  "/:id",
+  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
 
-    const order = await prisma.order.findUnique({
-      where: { id },
-      include: {
-        items: {
-          include: {
-            product: true,
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({
+          message: "Invalid order ID",
+        });
+      }
+
+      const order = await prisma.order.findUnique({
+        where: {
+          id,
+        },
+        include: {
+          items: {
+            include: {
+              product: true,
+            },
           },
+          table: true,
+          waiter: {
+            select: safeWaiterSelect,
+          },
+          payment: true,
         },
-        table: true,
-        waiter: {
-          select: safeWaiterSelect,
-        },
-        payment: true,
-      },
-    });
+      });
 
-    if (!order) {
-      return res.status(404).json({
-        message: "Order not found",
+      if (!order) {
+        return res.status(404).json({
+          message: "Order not found",
+        });
+      }
+
+      return res.json(order);
+    } catch (error) {
+      console.error("Fetch order error:", error);
+
+      return res.status(500).json({
+        message: "Failed to fetch order",
       });
     }
-
-    res.json(order);
-  } catch (error) {
-    console.error("Fetch order error:", error);
-
-    res.status(500).json({
-      message: "Failed to fetch order",
-    });
-  }
-});
+  },
+);
 
 export default router;
