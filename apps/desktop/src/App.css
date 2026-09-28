@@ -118,7 +118,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .completed-item strong { display: block; font-size: 13px; }
 .completed-item span { margin-top: 4px; }
 
-/* Existing bill preview surface: layout only, with receipt markup and actions unchanged. */
+/* Cashier receipt preview and thermal-printer layout. */
 .receipt-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -145,41 +145,105 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   margin-bottom: 14px;
 }
 .thermal-receipt {
-  width: 80mm;
+  width: 304px;
   max-width: 100%;
   margin: 0 auto;
-  padding: 8mm;
+  padding: 18px 16px;
   background: #fff;
   color: #111;
   box-shadow: 0 8px 22px rgba(30, 25, 18, .1);
-  font-family: Arial, Helvetica, "Helvetica Neue", Roboto, sans-serif, saudi_riyal;
-  font-size: 12px;
-  line-height: 1.25;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 11px;
+  line-height: 1.35;
 }
-.receipt-header, .receipt-total { text-align: center; }
-.receipt-header h2 { margin: 0; }
-.receipt-header p { margin: 4px 0 18px; }
-.receipt-meta, .receipt-row {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 14px;
-  padding: 8px 0;
+.receipt-header,
+.receipt-footer {
+  text-align: center;
 }
-.receipt-meta { grid-template-columns: 1fr 1fr; }
-.receipt-meta span, .receipt-row small {
-  display: block;
-  color: #666;
+.receipt-header h2 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+.receipt-header p {
+  margin: 3px 0 0;
   font-size: 11px;
 }
-.receipt-meta strong { display: block; margin-top: 4px; }
+.receipt-divider {
+  width: 100%;
+  margin: 11px 0;
+  border: 0;
+  border-top: 1px dashed #333;
+}
+.receipt-details {
+  display: grid;
+  gap: 4px;
+}
+.receipt-details > div,
+.receipt-summary-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.receipt-details span,
+.receipt-summary-row span {
+  flex: 0 0 auto;
+}
+.receipt-details strong,
+.receipt-summary-row strong {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.receipt-items {
+  display: grid;
+}
+.receipt-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px 54px 62px;
+  gap: 4px;
+  align-items: start;
+  padding: 5px 0;
+}
+.receipt-row > :not(:first-child) {
+  text-align: right;
+}
+.receipt-heading {
+  padding: 0 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+}
+.receipt-item-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.receipt-summary {
+  display: grid;
+  gap: 5px;
+}
 .receipt-total {
   display: flex;
   justify-content: space-between;
-  font-size: 17px;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 800;
 }
-.receipt-heading {
-  color: #666;
-  font-size: 11px;
+.receipt-total strong {
+  font-size: 18px;
+  white-space: nowrap;
+}
+.receipt-payment {
+  margin: 0;
+  font-weight: 700;
+}
+.receipt-footer {
+  display: grid;
+  gap: 3px;
+  padding: 2px 0 0;
+}
+.receipt-footer strong {
+  font-size: 13px;
   text-transform: uppercase;
 }
 
@@ -251,36 +315,26 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 
 @media print {
   @page {
-    size: 80mm 220mm;
+    size: 80mm auto;
     margin: 0;
   }
 
   html, body {
     width: 80mm;
     min-width: 80mm;
+    height: auto;
     margin: 0;
     padding: 0;
     background: #fff;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
   }
 
-  body * { visibility: hidden !important; }
-
-  /* Remove the dashboard from print layout entirely so it cannot create
-     additional blank pages. Only the existing receipt modal is printable. */
-  #root,
-  .app-shell,
-  .content-shell,
-  .receipt-modal-backdrop,
-  .receipt-dialog,
-  #receipt-to-print,
-  #receipt-to-print * {
-    visibility: visible !important;
-  }
-  .content-shell > *:not(.receipt-modal-backdrop) {
+  body > *:not(#receipt-modal-root) {
     display: none !important;
   }
 
-  .receipt-modal-backdrop,
+  #receipt-modal-root,
   .receipt-dialog {
     position: static;
     display: block;
@@ -303,17 +357,24 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
     min-height: 0;
     height: auto;
     margin: 0;
-    padding: 5mm;
+    padding: 4mm;
     box-shadow: none;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 10pt;
     page-break-before: avoid;
-    page-break-after: avoid;
-    break-before: avoid-page;
-    break-after: avoid-page;
   }
 
   #receipt-to-print,
   #receipt-to-print * {
-    page-break-inside: avoid;
-    break-inside: avoid;
+    visibility: visible !important;
+  }
+
+  .receipt-actions,
+  .no-print {
+    display: none !important;
+  }
+
+  .receipt-divider {
+    border-top-style: dashed;
   }
 }

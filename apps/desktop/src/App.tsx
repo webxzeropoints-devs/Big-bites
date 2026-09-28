@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import "./App.css";
 
-const API_URL = "https://big-bites-server.onrender.com";
+const API_URL =
+  import.meta.env.VITE_API_URL ?? "https://big-bites-server.onrender.com";
 
 type Screen = "billing" | "admin";
 type User = { id: number; name: string; username: string; role: string };
@@ -115,7 +117,11 @@ function App() {
         </nav>
       </header>
 
-      {screen === "billing" ? <BillingScreen token={token} /> : <AdminScreen token={token} />}
+      {screen === "billing" ? (
+        <BillingScreen token={token} cashierName={user.name} />
+      ) : (
+        <AdminScreen token={token} />
+      )}
     </div>
   );
 }
@@ -188,17 +194,36 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
 
 function ReceiptPreview({
   order,
+  cashierName,
   onClose,
   onProceedToPayment,
 }: {
   order: Order;
+  cashierName: string;
   onClose: () => void;
   onProceedToPayment?: () => void;
 }) {
   const paid = order.payment?.status === "PAID" || order.status === "COMPLETED";
+  const subtotal = order.items.reduce(
+    (sum, item) => sum + Number(item.subtotal),
+    0,
+  );
+  const receiptDate = new Date(order.payment?.paidAt ?? order.createdAt);
+  const dateTime = Number.isNaN(receiptDate.getTime())
+    ? "Date unavailable"
+    : `${String(receiptDate.getDate()).padStart(2, "0")}/${String(
+        receiptDate.getMonth() + 1,
+      ).padStart(2, "0")}/${receiptDate.getFullYear()} ${String(
+        receiptDate.getHours(),
+      ).padStart(2, "0")}:${String(receiptDate.getMinutes()).padStart(2, "0")}`;
 
-  return (
-    <div className="receipt-modal-backdrop" role="dialog" aria-modal="true">
+  return createPortal(
+    <div
+      className="receipt-modal-backdrop"
+      id="receipt-modal-root"
+      role="dialog"
+      aria-modal="true"
+    >
       <div className="receipt-dialog">
         <div className="receipt-actions no-print">
           {onProceedToPayment && (
@@ -214,61 +239,107 @@ function ReceiptPreview({
           </button>
         </div>
 
-        <article className="thermal-receipt" id="receipt-to-print">
+        <article
+          className="thermal-receipt"
+          id="receipt-to-print"
+          aria-label={`Receipt for order ${order.id}`}
+        >
           <div className="receipt-header">
             <h2>BIG BITES</h2>
-            <p>Hotel Restaurant</p>
+            <p>Restaurant &amp; Cafe</p>
           </div>
 
-          <div className="receipt-meta">
+          <hr className="receipt-divider" />
+
+          <div className="receipt-details">
             <div>
-              <span>Table</span>
-              <strong>{order.table.isParcel ? "Parcel" : `Table ${order.table.number}`}</strong>
-            </div>
-            <div>
-              <span>Order</span>
+              <span>Bill No:</span>
               <strong>#{order.id}</strong>
             </div>
-          </div>
-
-          <hr />
-
-          <div className="receipt-row receipt-heading">
-            <span>Item</span>
-            <span>Qty</span>
-            <span>Amt</span>
-          </div>
-
-          {order.items.map((item) => (
-            <div className="receipt-row" key={item.id}>
-              <span>
-                {item.product.name}
-                <small>{money(item.unitPrice)} each</small>
-              </span>
-              <span>{item.quantity}</span>
-              <span>{money(item.subtotal)}</span>
+            <div>
+              <span>Date:</span>
+              <strong>{dateTime}</strong>
             </div>
-          ))}
+            <div>
+              <span>Table:</span>
+              <strong>{order.table.isParcel ? "Parcel" : order.table.number}</strong>
+            </div>
+            <div>
+              <span>Cashier:</span>
+              <strong>{cashierName}</strong>
+            </div>
+          </div>
 
-          <hr />
+          <hr className="receipt-divider" />
+
+          <div className="receipt-items">
+            <div className="receipt-row receipt-heading">
+              <span>Item</span>
+              <span>Qty</span>
+              <span>Price</span>
+              <span>Total</span>
+            </div>
+
+            {order.items.map((item) => (
+              <div className="receipt-row" key={item.id}>
+                <span className="receipt-item-name">{item.product.name}</span>
+                <span>{item.quantity}</span>
+                <span>{money(item.unitPrice)}</span>
+                <span>{money(item.subtotal)}</span>
+              </div>
+            ))}
+          </div>
+
+          <hr className="receipt-divider" />
+
+          <div className="receipt-summary">
+            <div className="receipt-summary-row">
+              <span>Subtotal</span>
+              <strong>{money(subtotal)}</strong>
+            </div>
+            <div className="receipt-summary-row">
+              <span>Tax</span>
+              <strong>{money(0)}</strong>
+            </div>
+            <div className="receipt-summary-row">
+              <span>Discount</span>
+              <strong>{money(0)}</strong>
+            </div>
+          </div>
+
+          <hr className="receipt-divider" />
 
           <div className="receipt-total">
-            <span>Total</span>
+            <span>GRAND TOTAL</span>
             <strong>{money(order.total)}</strong>
           </div>
 
-          <p>Payment: {paid ? order.payment?.method ?? "PAID" : "UNPAID"}</p>
-          <p>Status: {paid ? "PAID" : "UNPAID"}</p>
-          <hr />
-          <h3>Thank you!</h3>
-          <p>Visit again</p>
+          <hr className="receipt-divider" />
+
+          <p className="receipt-payment">
+            Payment: {paid ? order.payment?.method ?? "PAID" : "UNPAID"}
+          </p>
+
+          <hr className="receipt-divider" />
+
+          <div className="receipt-footer">
+            <strong>Thank You</strong>
+            <span>Visit Again</span>
+          </div>
         </article>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
-function BillingScreen({ token }: { token: string }) {
+function BillingScreen({
+  token,
+  cashierName,
+}: {
+  token: string;
+  cashierName: string;
+}) {
   const [orders, setOrders] = useState<Order[]>([]);
   const [completed, setCompleted] = useState<Order[]>([]);
   const [selected, setSelected] = useState<Order | null>(null);
@@ -372,7 +443,7 @@ function BillingScreen({ token }: { token: string }) {
           <div className="panel-heading">
             <div>
               <div className="eyebrow">Open orders</div>
-              <h3>Active bills</h3>
+              <h3>Ready for billing</h3>
             </div>
             <span className="pill dark">{orders.length}</span>
           </div>
@@ -421,7 +492,11 @@ function BillingScreen({ token }: { token: string }) {
                       <span className="label">Order #{order.id}</span>
                       <h4>{tableLabel(order.table)}</h4>
                     </div>
-                    <span className="status-pill pending">{order.status}</span>
+                    <span className="status-pill pending">
+                      {order.status === "READY_FOR_BILLING"
+                        ? "READY FOR BILLING"
+                        : order.status}
+                    </span>
                   </div>
 
                   <div className="order-card-grid">
@@ -453,7 +528,7 @@ function BillingScreen({ token }: { token: string }) {
             <div className="bill-placeholder">
               <div className="placeholder-icon">P</div>
               <h3>Select an order</h3>
-              <p>Choose an unpaid order to review, confirm payment, and print the receipt.</p>
+              <p>              Choose an order sent by the waiter to generate its bill and receive payment.</p>
             </div>
           ) : (
             <>
@@ -486,7 +561,7 @@ function BillingScreen({ token }: { token: string }) {
 
               <div className="action-row">
                 <button className="secondary-btn" onClick={() => setPreview(selected)}>
-                  View bill
+                  Generate Bill
                 </button>
               </div>
 
@@ -528,7 +603,7 @@ function BillingScreen({ token }: { token: string }) {
                   )}
 
                   <button className="primary-btn full" onClick={() => void pay()}>
-                    Confirm {method} payment
+                    PAYMENT RECEIVED
                   </button>
                 </div>
               )}
@@ -574,6 +649,7 @@ function BillingScreen({ token }: { token: string }) {
       {preview && (
         <ReceiptPreview
           order={preview}
+          cashierName={cashierName}
           onClose={() => setPreview(null)}
           onProceedToPayment={
             preview.payment?.status === "PAID" || preview.status === "COMPLETED"

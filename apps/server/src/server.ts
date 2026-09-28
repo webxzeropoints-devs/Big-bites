@@ -29,6 +29,10 @@ app.use("/api/orders", ordersRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/admin", adminRouter);
 
+app.use("/api", (_req, res) => {
+  res.status(404).json({ message: "API route not found" });
+});
+
 // Root route
 app.get("/", (req, res) => {
   res.json({

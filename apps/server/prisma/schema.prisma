@@ -25,6 +25,7 @@ enum OrderStatus {
   PREPARING
   READY
   SERVED
+  READY_FOR_BILLING
   COMPLETED
   CANCELLED
 }
@@ -121,7 +122,7 @@ model OrderItem {
 model Payment {
   id        Int           @id @default(autoincrement())
   amount    Decimal       @db.Decimal(10, 2)
-  method    PaymentMethod
+  method    PaymentMethod?
   status    PaymentStatus @default(PENDING)
   paidAt    DateTime?
   createdAt DateTime      @default(now())
