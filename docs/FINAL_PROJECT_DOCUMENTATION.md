@@ -121,9 +121,12 @@ Backend:
 ```powershell
 cd C:\Users\vjsan\hotel-pos\apps\server
 npm install
-npx prisma migrate deploy
 npm run dev
 ```
+
+Production startup via `npm start` runs `prisma migrate deploy` before starting
+the server, so pending schema migrations are applied before API routes serve
+requests.
 
 Desktop:
 
@@ -155,7 +158,9 @@ waiter: flutter test
 
 The Flutter widget test verifies that the waiter login screen renders its title, login heading, and login button. The server `npm test` command runs the backend TypeScript check. The project currently has no separate backend or desktop unit-test suite; backend and desktop correctness is verified by TypeScript compilation and the production desktop build.
 
-The database migration status is currently clean: all three migrations, including the legacy Kitchen-role cleanup and Parcel table migration, are applied and the database schema is up to date.
+The database migration status should be checked with `npx prisma migrate status`
+against the target database. Production startup applies pending migrations
+before serving API requests.
 
 ## 13. Limitations and Future Enhancements
 
