@@ -162,9 +162,11 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 }
 .receipt-header h2 {
   margin: 0;
-  font-size: 21px;
+  font-size: 15px;
   font-weight: 800;
-  letter-spacing: .08em;
+  line-height: 1.2;
+  letter-spacing: .02em;
+  overflow-wrap: anywhere;
 }
 .receipt-header p {
   margin: 3px 0 0;
@@ -250,7 +252,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .admin-shell { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 20px; align-items: start; }
 .admin-sidebar { position: sticky; top: 20px; padding: 18px 12px; border-radius: 16px; background: #171a1f; color: #fff; box-shadow: 0 12px 24px rgba(20,20,20,.12); }
 .sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 5px 8px 18px; border-bottom: 1px solid rgba(255,255,255,.1); }
-.sidebar-brand strong { font-size: 16px; letter-spacing: .02em; }
+.sidebar-brand strong { min-width: 0; font-size: 13px; line-height: 1.3; letter-spacing: .02em; overflow-wrap: anywhere; }
 .brand-circle { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: #f3e2bd; color: #6f501c; font-size: 20px; }
 .brand-circle.small { width: 32px; height: 32px; border-radius: 9px; font-size: 15px; }
 .sidebar-nav { display: grid; gap: 6px; padding-top: 18px; }
@@ -267,6 +269,27 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .data-row { padding: 12px 0; border-bottom: 1px solid #eee9e3; font-size: 13px; }
 .data-row:last-child { border-bottom: 0; }
 .data-row > span { color: #737a83; font-size: 12px; text-align: right; }
+.data-row-primary { min-width: 0; overflow-wrap: anywhere; }
+.table-data-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px; }
+.data-row-status { justify-self: end; }
+.order-data-row, .payment-data-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 1.2fr); }
+.data-row-secondary { min-width: 0; }
+.order-row-details { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(90px, .5fr) minmax(150px, 1fr); gap: 10px; align-items: center; }
+.order-row-details > span, .order-row-details time { min-width: 0; overflow-wrap: anywhere; }
+.payment-row-details { display: grid; grid-template-columns: minmax(80px, .8fr) minmax(75px, .8fr) minmax(90px, auto); gap: 10px; align-items: center; }
+.payment-row-details > strong { color: #20242a; font-size: 12px; }
+.bill-summary { display: grid; gap: 8px; margin-top: auto; padding-top: 16px; }
+.bill-summary-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; }
+.bill-summary-row > span { color: #737a83; }
+.bill-summary-row > strong { text-align: right; }
+.bill-summary .bill-total-row { margin-top: 4px; padding: 14px 0 4px; border-top: 1px solid #eee9e3; }
+.gst-settings-panel { padding: 22px; }
+.gst-settings-form { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto auto; align-items: end; gap: 12px; max-width: 900px; }
+.gst-settings-form > label { display: grid; gap: 7px; color: #666b72; font-size: 12px; font-weight: 700; }
+.gst-input-row { display: flex; align-items: center; gap: 9px; }
+.gst-input-row input { max-width: 180px; }
+.gst-input-row > span { color: #666b72; }
+.gst-split-preview { display: grid; gap: 6px; color: #737a83; font-size: 13px; }
 .table-wrap { overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table th { padding: 12px 10px; border-bottom: 1px solid #ded8cf; color: #81868c; font-size: 11px; letter-spacing: .08em; text-align: left; text-transform: uppercase; }
@@ -299,6 +322,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   .billing-layout, .admin-grid { grid-template-columns: 1fr; }
   .admin-sidebar { position: static; }
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .gst-settings-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   .app-header, .page-header { align-items: flex-start; flex-direction: column; }
@@ -311,6 +335,11 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   .two-col { grid-template-columns: 1fr; }
   .search-field.compact { min-width: 0; flex: 1; }
   .admin-header .page-actions { justify-content: flex-start; }
+  .order-data-row, .payment-data-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  .order-row-details { grid-template-columns: minmax(75px, .7fr) minmax(70px, .5fr) minmax(100px, 1fr); }
+  .payment-row-details { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .gst-settings-form { grid-template-columns: 1fr; align-items: stretch; }
+  .gst-settings-form > button { width: 100%; }
 }
 
 @media print {

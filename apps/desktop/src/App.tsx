@@ -4,6 +4,7 @@ import "./App.css";
 
 const API_URL =
   import.meta.env.VITE_API_URL ?? "https://big-bites-server.onrender.com";
+const RESTAURANT_NAME = "BIG BITES FAMILY RESTAURANT";
 
 type Screen = "billing" | "admin";
 type User = { id: number; name: string; username: string; role: string };
@@ -29,6 +30,14 @@ type Order = {
   id: number;
   status: string;
   total: string | number;
+  subtotal?: number | string;
+  gstRate?: number | string;
+  cgstRate?: number | string;
+  sgstRate?: number | string;
+  cgstAmount?: number | string;
+  sgstAmount?: number | string;
+  gstAmount?: number | string;
+  grandTotal?: number | string;
   createdAt: string;
   table: { id?: number; number: number; isParcel?: boolean };
   items: OrderItem[];
@@ -49,6 +58,21 @@ const tableLabel = (table: { number: number; isParcel?: boolean }) =>
   table.isParcel ? "Parcel" : `Table ${table.number}`;
 
 const money = (value: string | number) => `₹${Number(value).toFixed(2)}`;
+const percent = (value: string | number) => {
+  const numericValue = Number(value);
+  return `${numericValue.toFixed(Number.isInteger(numericValue) ? 0 : 2)}%`;
+};
+
+const orderAmounts = (order: Order) => ({
+  subtotal: Number(order.subtotal ?? order.total),
+  gstRate: Number(order.gstRate ?? 0),
+  cgstRate: Number(order.cgstRate ?? 0),
+  sgstRate: Number(order.sgstRate ?? 0),
+  cgstAmount: Number(order.cgstAmount ?? 0),
+  sgstAmount: Number(order.sgstAmount ?? 0),
+  gstAmount: Number(order.gstAmount ?? 0),
+  grandTotal: Number(order.grandTotal ?? order.total),
+});
 
 async function request(path: string, options: RequestInit = {}, token?: string) {
   const headers = new Headers(options.headers);
@@ -86,7 +110,7 @@ function App() {
     <div className="app-shell">
       <header className="app-header">
         <div>
-          <div className="eyebrow">BIG BITES</div>
+          <div className="eyebrow">{RESTAURANT_NAME}</div>
           <h1>Billing & Administration</h1>
           <span className="user-role">{user.name} · {user.role}</span>
         </div>
@@ -156,7 +180,7 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
         <div className="brand-block">
           <div className="brand-circle">BB</div>
           <div>
-            <div className="eyebrow">BIG BITES</div>
+            <div className="eyebrow">{RESTAURANT_NAME}</div>
             <h1>Welcome back</h1>
           </div>
         </div>
@@ -208,6 +232,7 @@ function ReceiptPreview({
     (sum, item) => sum + Number(item.subtotal),
     0,
   );
+  const amounts = orderAmounts(order);
   const receiptDate = new Date(order.payment?.paidAt ?? order.createdAt);
   const dateTime = Number.isNaN(receiptDate.getTime())
     ? "Date unavailable"
@@ -245,8 +270,7 @@ function ReceiptPreview({
           aria-label={`Receipt for order ${order.id}`}
         >
           <div className="receipt-header">
-            <h2>BIG BITES</h2>
-            <p>Restaurant &amp; Cafe</p>
+            <h2>{RESTAURANT_NAME}</h2>
           </div>
 
           <hr className="receipt-divider" />
@@ -298,8 +322,16 @@ function ReceiptPreview({
               <strong>{money(subtotal)}</strong>
             </div>
             <div className="receipt-summary-row">
-              <span>Tax</span>
-              <strong>{money(0)}</strong>
+              <span>CGST ({percent(amounts.cgstRate)})</span>
+              <strong>{money(amounts.cgstAmount)}</strong>
+            </div>
+            <div className="receipt-summary-row">
+              <span>SGST ({percent(amounts.sgstRate)})</span>
+              <strong>{money(amounts.sgstAmount)}</strong>
+            </div>
+            <div className="receipt-summary-row">
+              <span>Total GST ({percent(amounts.gstRate)})</span>
+              <strong>{money(amounts.gstAmount)}</strong>
             </div>
             <div className="receipt-summary-row">
               <span>Discount</span>
@@ -311,7 +343,7 @@ function ReceiptPreview({
 
           <div className="receipt-total">
             <span>GRAND TOTAL</span>
-            <strong>{money(order.total)}</strong>
+            <strong>{money(amounts.grandTotal)}</strong>
           </div>
 
           <hr className="receipt-divider" />
@@ -392,9 +424,10 @@ function BillingScreen({
   async function pay() {
     if (!selected) return;
 
+    const grandTotal = orderAmounts(selected).grandTotal;
     const received = method === "CASH" ? Number(amountReceived) : 0;
-    if (method === "CASH" && (!Number.isFinite(received) || received < Number(selected.total))) {
-      setError(`Amount received must be at least ${money(selected.total)}.`);
+    if (method === "CASH" && (!Number.isFinite(received) || received < grandTotal)) {
+      setError(`Amount received must be at least ${money(grandTotal)}.`);
       return;
     }
 
@@ -510,7 +543,7 @@ function BillingScreen({
                     </div>
                     <div>
                       <span>Total</span>
-                      <strong>{money(order.total)}</strong>
+                      <strong>{money(orderAmounts(order).grandTotal)}</strong>
                     </div>
                   </div>
 
@@ -554,9 +587,27 @@ function BillingScreen({
                 ))}
               </div>
 
-              <div className="bill-total-row">
-                <span>Grand total</span>
-                <strong>{money(selected.total)}</strong>
+              <div className="bill-summary">
+                <div className="bill-summary-row">
+                  <span>Subtotal</span>
+                  <strong>{money(orderAmounts(selected).subtotal)}</strong>
+                </div>
+                <div className="bill-summary-row">
+                  <span>CGST ({percent(orderAmounts(selected).cgstRate)})</span>
+                  <strong>{money(orderAmounts(selected).cgstAmount)}</strong>
+                </div>
+                <div className="bill-summary-row">
+                  <span>SGST ({percent(orderAmounts(selected).sgstRate)})</span>
+                  <strong>{money(orderAmounts(selected).sgstAmount)}</strong>
+                </div>
+                <div className="bill-summary-row">
+                  <span>Total GST ({percent(orderAmounts(selected).gstRate)})</span>
+                  <strong>{money(orderAmounts(selected).gstAmount)}</strong>
+                </div>
+                <div className="bill-total-row">
+                  <span>Grand total</span>
+                  <strong>{money(orderAmounts(selected).grandTotal)}</strong>
+                </div>
               </div>
 
               <div className="action-row">
@@ -572,7 +623,9 @@ function BillingScreen({
               ) : (
                 <div className="payment-box">
                   <h4>Payment details</h4>
-                  <div className="due-amount">Amount due: {money(selected.total)}</div>
+                  <div className="due-amount">
+                    Amount due: {money(orderAmounts(selected).grandTotal)}
+                  </div>
 
                   <div className="payment-methods">
                     {["CASH", "UPI", "CARD"].map((value) => (
@@ -591,13 +644,15 @@ function BillingScreen({
                       Amount received
                       <input
                         type="number"
-                        min={Number(selected.total)}
+                        min={orderAmounts(selected).grandTotal}
                         step="0.01"
                         value={amountReceived}
                         onChange={(event) => setAmountReceived(event.target.value)}
                       />
-                      {amountReceived && Number(amountReceived) >= Number(selected.total) && (
-                        <strong>Change: {money(Number(amountReceived) - Number(selected.total))}</strong>
+                      {amountReceived && Number(amountReceived) >= orderAmounts(selected).grandTotal && (
+                        <strong>
+                          Change: {money(Number(amountReceived) - orderAmounts(selected).grandTotal)}
+                        </strong>
                       )}
                     </label>
                   )}
@@ -634,7 +689,7 @@ function BillingScreen({
                     Order #{order.id} · {tableLabel(order.table)}
                   </strong>
                   <span>
-                    {money(order.total)} · {order.payment?.method ?? "-"} · PAID
+                    {money(orderAmounts(order).grandTotal)} · {order.payment?.method ?? "-"} · PAID
                   </span>
                 </div>
                 <button className="secondary-btn small" onClick={() => setPreview(order)}>
@@ -667,7 +722,7 @@ function BillingScreen({
 }
 
 function AdminScreen({ token }: { token: string }) {
-  const [activeTab, setActiveTab] = useState<"overview" | "products" | "tables" | "orders" | "payments" | "waiters" | "staff">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "products" | "tables" | "orders" | "payments" | "settings" | "waiters" | "staff">("overview");
   const [dashboard, setDashboard] = useState<Dashboard>({
     openOrders: 0,
     completedOrders: 0,
@@ -703,6 +758,11 @@ function AdminScreen({ token }: { token: string }) {
     isActive: true,
   });
   const [productQuery, setProductQuery] = useState("");
+  const [gstRate, setGstRate] = useState("5");
+  const [savingGst, setSavingGst] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState("");
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   const load = async () => {
     try {
@@ -724,6 +784,57 @@ function AdminScreen({ token }: { token: string }) {
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load admin data");
+    }
+  };
+
+  const loadGstSettings = async () => {
+    setSettingsLoaded(false);
+    setSettingsError("");
+    try {
+      const settings = await request("/api/admin/settings", {}, token);
+      setGstRate(String(settings.gstRate));
+      setSettingsLoaded(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to load GST settings";
+      setSettingsError(
+        message === "API route not found"
+          ? "GST settings are unavailable because the backend update has not been deployed. Deploy the server update and apply its database migration, then refresh."
+          : `Unable to load GST settings: ${message}`,
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "settings") void loadGstSettings();
+  }, [activeTab, token]);
+
+  const saveGstRate = async (event: FormEvent) => {
+    event.preventDefault();
+    setSettingsMessage("");
+    setSettingsError("");
+    setSavingGst(true);
+
+    try {
+      const settings = await request(
+        "/api/admin/settings",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ gstRate: Number(gstRate) }),
+        },
+        token,
+      );
+      setGstRate(String(settings.gstRate));
+      setSettingsLoaded(true);
+      setSettingsMessage("GST setting saved.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unable to save GST setting";
+      setSettingsError(
+        message === "API route not found"
+          ? "GST settings cannot be saved until the backend update is deployed and its database migration is applied."
+          : `Unable to save GST setting: ${message}`,
+      );
+    } finally {
+      setSavingGst(false);
     }
   };
 
@@ -927,7 +1038,7 @@ function AdminScreen({ token }: { token: string }) {
         <aside className="admin-sidebar">
           <div className="sidebar-brand">
             <div className="brand-circle small">BB</div>
-            <strong>BIG BITES</strong>
+            <strong>{RESTAURANT_NAME}</strong>
           </div>
 
           <div className="sidebar-nav">
@@ -945,6 +1056,9 @@ function AdminScreen({ token }: { token: string }) {
             </button>
             <button className={activeTab === "payments" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("payments")}>
               <span className="nav-icon">₹</span> Payments
+            </button>
+            <button className={activeTab === "settings" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("settings")}>
+              <span className="nav-icon">⚙</span> GST Settings
             </button>
             <button className={activeTab === "waiters" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("waiters")}>
               <span className="nav-icon">♙</span> Waiters
@@ -988,9 +1102,9 @@ function AdminScreen({ token }: { token: string }) {
 
                   <div className="data-list">
                     {tables.map((table) => (
-                      <div className="data-row" key={table.id}>
-                        <strong>{table.isParcel ? "Parcel" : `Table ${table.number}`}</strong>
-                        <span className={table.status === "AVAILABLE" ? "status-text success" : "status-text danger"}>{table.status}</span>
+                      <div className="data-row table-data-row" key={table.id}>
+                        <strong className="data-row-primary">{table.isParcel ? "Parcel" : `Table ${table.number}`}</strong>
+                        <span className={`data-row-status ${table.status === "AVAILABLE" ? "status-text success" : "status-text danger"}`}>{table.status}</span>
                       </div>
                     ))}
                   </div>
@@ -1006,10 +1120,12 @@ function AdminScreen({ token }: { token: string }) {
 
                   <div className="data-list">
                     {orders.slice(0, 8).map((order) => (
-                      <div className="data-row" key={order.id}>
-                        <strong>Order #{order.id} · {tableLabel(order.table)}</strong>
-                        <span>
-                          {order.status} · {money(order.total)} · {new Date(order.createdAt).toLocaleString()}
+                      <div className="data-row order-data-row" key={order.id}>
+                        <strong className="data-row-primary">Order #{order.id} · {tableLabel(order.table)}</strong>
+                        <span className="data-row-secondary order-row-details">
+                          <span>{order.status}</span>
+                          <span>{money(orderAmounts(order).grandTotal)}</span>
+                          <time>{new Date(order.createdAt).toLocaleString()}</time>
                         </span>
                       </div>
                     ))}
@@ -1109,9 +1225,9 @@ function AdminScreen({ token }: { token: string }) {
 
               <div className="data-list">
                 {tables.map((table) => (
-                  <div className="data-row" key={table.id}>
-                    <strong>{table.isParcel ? "Parcel" : `Table ${table.number}`}</strong>
-                    <span className={table.status === "AVAILABLE" ? "status-text success" : "status-text danger"}>{table.status}</span>
+                  <div className="data-row table-data-row" key={table.id}>
+                    <strong className="data-row-primary">{table.isParcel ? "Parcel" : `Table ${table.number}`}</strong>
+                    <span className={`data-row-status ${table.status === "AVAILABLE" ? "status-text success" : "status-text danger"}`}>{table.status}</span>
                   </div>
                 ))}
               </div>
@@ -1129,10 +1245,12 @@ function AdminScreen({ token }: { token: string }) {
 
               <div className="data-list">
                 {orders.slice(0, 20).map((order) => (
-                  <div className="data-row" key={order.id}>
-                    <strong>Order #{order.id} · {tableLabel(order.table)}</strong>
-                    <span>
-                      {order.status} · {money(order.total)} · {new Date(order.createdAt).toLocaleString()}
+                  <div className="data-row order-data-row" key={order.id}>
+                    <strong className="data-row-primary">Order #{order.id} · {tableLabel(order.table)}</strong>
+                    <span className="data-row-secondary order-row-details">
+                      <span>{order.status}</span>
+                      <span>{money(orderAmounts(order).grandTotal)}</span>
+                      <time>{new Date(order.createdAt).toLocaleString()}</time>
                     </span>
                   </div>
                 ))}
@@ -1151,16 +1269,76 @@ function AdminScreen({ token }: { token: string }) {
 
               <div className="data-list">
                 {payments.slice(0, 20).map((payment) => (
-                  <div className="data-row" key={payment.id}>
-                    <strong>
+                  <div className="data-row payment-data-row" key={payment.id}>
+                    <strong className="data-row-primary">
                       Payment #{payment.id} · Order #{payment.orderId}
                     </strong>
-                    <span>
-                      {payment.method} · {payment.status} · {money(payment.amount)}
+                    <span className="data-row-secondary payment-row-details">
+                      <span>{payment.method ?? "—"}</span>
+                      <span>{payment.status}</span>
+                      <strong>{money(payment.amount)}</strong>
                     </span>
                   </div>
                 ))}
               </div>
+            </section>
+          )}
+
+          {activeTab === "settings" && (
+            <section className="panel gst-settings-panel">
+              <div className="panel-heading">
+                <div>
+                  <div className="eyebrow">Billing configuration</div>
+                  <h3>GST Settings</h3>
+                </div>
+              </div>
+              {settingsMessage && (
+                <div className="success-banner">{settingsMessage}</div>
+              )}
+              {settingsError && (
+                <div className="error-banner">{settingsError}</div>
+              )}
+              <form className="gst-settings-form" onSubmit={saveGstRate}>
+                <label>
+                  GST
+                  <div className="gst-input-row">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.01"
+                      value={gstRate}
+                      onChange={(event) => {
+                        setGstRate(event.target.value);
+                        setSettingsMessage("");
+                        setSettingsError("");
+                      }}
+                      required
+                      disabled={!settingsLoaded || savingGst}
+                    />
+                    <span>%</span>
+                  </div>
+                </label>
+                <div className="gst-split-preview">
+                  <span>CGST ({percent(Number(gstRate) / 2)})</span>
+                  <span>SGST ({percent(Number(gstRate) / 2)})</span>
+                </div>
+                <button
+                  className="secondary-btn"
+                  disabled={settingsLoaded || savingGst}
+                  onClick={() => void loadGstSettings()}
+                  type="button"
+                >
+                  Retry
+                </button>
+                <button
+                  className="primary-btn"
+                  disabled={!settingsLoaded || savingGst}
+                  type="submit"
+                >
+                  {savingGst ? "Saving..." : "Save GST"}
+                </button>
+              </form>
             </section>
           )}
 
