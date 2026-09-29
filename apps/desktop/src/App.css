@@ -172,7 +172,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   margin: 3px 0 0;
   font-size: 11px;
 }
-.receipt-header .receipt-address { white-space: pre-line; overflow-wrap: anywhere; }
+.receipt-header .receipt-address { margin: 4px 0 0; text-align: center; white-space: pre-line; overflow-wrap: anywhere; }
 .receipt-divider {
   width: 100%;
   margin: 11px 0;
@@ -291,6 +291,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .gst-settings-form > label { display: grid; gap: 7px; color: #666b72; font-size: 12px; font-weight: 700; }
 .gst-settings-form .address-field { grid-column: 1 / -1; }
 .gst-settings-form textarea { width: 100%; resize: vertical; border: 1px solid #ded8cf; border-radius: 8px; padding: 10px 11px; outline: none; background: #fff; color: #22272d; font: inherit; line-height: 1.5; }
+.gst-settings-form .address-field small { color: #8a8f96; font-size: 11px; font-weight: 500; }
 .gst-settings-form textarea:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(212,162,76,.14); }
 .gst-settings-form textarea:disabled { background: #f5f2ee; color: #737a83; }
 .gst-input-row { display: flex; align-items: center; gap: 9px; }

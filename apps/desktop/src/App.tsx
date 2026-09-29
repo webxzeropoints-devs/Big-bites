@@ -388,6 +388,22 @@ function BillingScreen({
   const [orderQuery, setOrderQuery] = useState("");
   const [orderFilter, setOrderFilter] = useState<"active" | "completed" | "all">("active");
 
+  async function loadBillAddress(order: Order) {
+    const billDetails = await request(
+      `/api/billing/orders/${order.id}`,
+      { cache: "no-store" },
+      token,
+    );
+
+    if (typeof billDetails.restaurantAddress !== "string") {
+      throw new Error(
+        "The billing server did not return the saved restaurant address. Refresh the server deployment and try again.",
+      );
+    }
+
+    return { ...order, restaurantAddress: billDetails.restaurantAddress };
+  }
+
   async function load() {
     try {
       const [active, done] = await Promise.all([
@@ -436,6 +452,15 @@ function BillingScreen({
   async function pay() {
     if (!selected) return;
 
+    let billWithAddress: Order;
+    try {
+      billWithAddress = await loadBillAddress(selected);
+      setSelected(billWithAddress);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load bill details");
+      return;
+    }
+
     const grandTotal = orderAmounts(selected).grandTotal;
     const received = method === "CASH" ? Number(amountReceived) : 0;
     if (method === "CASH" && (!Number.isFinite(received) || received < grandTotal)) {
@@ -453,7 +478,11 @@ function BillingScreen({
         token,
       );
 
-      const paidOrder = { ...selected, status: "COMPLETED", payment: result.payment };
+      const paidOrder = {
+        ...billWithAddress,
+        status: "COMPLETED",
+        payment: result.payment,
+      };
       setSuccess(`Payment successful. Order #${selected.id} is completed.`);
       setSelected(null);
       setShowPayment(false);
@@ -526,10 +555,22 @@ function BillingScreen({
                 <button
                   key={order.id}
                   className={selected?.id === order.id ? "order-card selected" : "order-card"}
-                  onClick={() => {
+                  onClick={async () => {
                     setSelected(order);
                     setShowPayment(false);
                     setError("");
+                    try {
+                      const orderWithAddress = await loadBillAddress(order);
+                      setSelected((current) =>
+                        current?.id === order.id ? orderWithAddress : current,
+                      );
+                    } catch (err) {
+                      setError(
+                        err instanceof Error
+                          ? err.message
+                          : "Unable to load bill details",
+                      );
+                    }
                   }}
                 >
                   <div className="order-card-top">
@@ -629,7 +670,23 @@ function BillingScreen({
               </div>
 
               <div className="action-row">
-                <button className="secondary-btn" onClick={() => setPreview(selected)}>
+                <button
+                  className="secondary-btn"
+                  onClick={async () => {
+                    try {
+                      const orderWithAddress = await loadBillAddress(selected);
+                      setSelected(orderWithAddress);
+                      setPreview(orderWithAddress);
+                      setError("");
+                    } catch (err) {
+                      setError(
+                        err instanceof Error
+                          ? err.message
+                          : "Unable to load bill details",
+                      );
+                    }
+                  }}
+                >
                   Generate Bill
                 </button>
               </div>
@@ -810,7 +867,11 @@ function AdminScreen({ token }: { token: string }) {
     setSettingsLoaded(false);
     setSettingsError("");
     try {
-      const settings = await request("/api/admin/settings", {}, token);
+      const settings = await request(
+        "/api/admin/settings",
+        { cache: "no-store" },
+        token,
+      );
       setGstRate(String(settings.gstRate));
       setRestaurantAddress(settings.restaurantAddress ?? "");
       setSettingsLoaded(true);
@@ -1350,9 +1411,9 @@ function AdminScreen({ token }: { token: string }) {
                 <label className="address-field">
                   Restaurant address
                   <textarea
-                    rows={3}
+                    rows={4}
                     maxLength={1000}
-                    placeholder="Enter the address to print on bills"
+                    placeholder="Enter each address line on a new line"
                     value={restaurantAddress}
                     onChange={(event) => {
                       setRestaurantAddress(event.target.value);
@@ -1361,6 +1422,7 @@ function AdminScreen({ token }: { token: string }) {
                     }}
                     disabled={!settingsLoaded || savingGst}
                   />
+                  <small>Use a new line for each address line. It will be printed below the restaurant name.</small>
                 </label>
                 <button
                   className="secondary-btn"
