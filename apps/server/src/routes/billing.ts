@@ -1,8 +1,33 @@
 import { Router } from "express";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
+import { calculateGstAmounts } from "../utils/gst.js";
 
 const router = Router();
+
+type TaxableOrder = { total: unknown; gstRate: unknown };
+
+const orderGstAmounts = (order: TaxableOrder) =>
+  calculateGstAmounts(Number(order.total), Number(order.gstRate));
+
+const withGstAmounts = <T extends TaxableOrder>(order: T) => ({
+  ...order,
+  ...orderGstAmounts(order),
+});
+
+function sumGstAmounts(orders: TaxableOrder[]) {
+  const amounts = orders.map(orderGstAmounts);
+  const sumCurrency = (select: (amount: (typeof amounts)[number]) => number) =>
+    amounts.reduce((sum, amount) => sum + Math.round(select(amount) * 100), 0) /
+    100;
+  const subtotal = sumCurrency((amount) => amount.subtotal);
+  const cgstAmount = sumCurrency((amount) => amount.cgstAmount);
+  const sgstAmount = sumCurrency((amount) => amount.sgstAmount);
+  const gstAmount = sumCurrency((amount) => amount.gstAmount);
+  const grandTotal = sumCurrency((amount) => amount.grandTotal);
+
+  return { subtotal, cgstAmount, sgstAmount, gstAmount, grandTotal };
+}
 
 class BillingRequestError extends Error {
   constructor(
@@ -53,7 +78,7 @@ router.get(
         },
       });
 
-      return res.json(orders);
+      return res.json(orders.map(withGstAmounts));
     } catch (error) {
       console.error("Billing orders error:", error);
 
@@ -106,7 +131,7 @@ router.get(
         take: 50,
       });
 
-      return res.json(orders);
+      return res.json(orders.map(withGstAmounts));
     } catch (error) {
       console.error("Completed billing orders error:", error);
 
@@ -174,6 +199,7 @@ router.get(
         status: order.status,
         items: order.items,
         total: order.total,
+        ...orderGstAmounts(order),
         payment: order.payment,
         createdAt: order.createdAt,
       });
@@ -271,7 +297,8 @@ router.post(
           );
         }
 
-        const total = Number(order.total);
+        const gstAmounts = orderGstAmounts(order);
+        const total = gstAmounts.grandTotal;
         if (
           method === "CASH" &&
           parsedAmountReceived !== undefined &&
@@ -288,7 +315,7 @@ router.post(
           ? await tx.payment.update({
               where: { orderId },
               data: {
-                amount: order.total,
+                amount: total,
                 method,
                 status: "PAID",
                 paidAt,
@@ -297,7 +324,7 @@ router.post(
           : await tx.payment.create({
               data: {
                 orderId,
-                amount: order.total,
+                amount: total,
                 method,
                 status: "PAID",
                 paidAt,
@@ -338,15 +365,16 @@ router.post(
           });
         }
 
-        return { payment, order: updatedOrder, total };
+        return { payment, order: updatedOrder, ...gstAmounts };
       });
 
-      const received = parsedAmountReceived ?? result.total;
+      const received = parsedAmountReceived ?? result.grandTotal;
       return res.json({
         message: "Payment received",
         ...result,
+        total: result.grandTotal,
         amountReceived: received,
-        change: method === "CASH" ? received - result.total : 0,
+        change: method === "CASH" ? received - result.grandTotal : 0,
       });
     } catch (error) {
       if (error instanceof BillingRequestError) {
@@ -432,10 +460,7 @@ router.get(
         });
       }
 
-      const total = orders.reduce(
-        (sum, order) => sum + Number(order.total),
-        0,
-      );
+      const amounts = sumGstAmounts(orders);
 
       return res.json({
         tableId: table.id,
@@ -444,8 +469,9 @@ router.get(
           ? "Parcel"
           : `Table ${table.number}`,
         orderCount: orders.length,
-        orders,
-        total,
+        orders: orders.map(withGstAmounts),
+        ...amounts,
+        total: amounts.grandTotal,
       });
     } catch (error) {
       console.error("Table billing error:", error);
@@ -559,10 +585,8 @@ router.post(
           );
         }
 
-        const total = orders.reduce(
-          (sum, order) => sum + Number(order.total),
-          0,
-        );
+        const amounts = sumGstAmounts(orders);
+        const total = amounts.grandTotal;
 
         if (
           method === "CASH" &&
@@ -592,11 +616,12 @@ router.post(
           }
 
           const paidAt = new Date();
+          const orderTotal = orderGstAmounts(order).grandTotal;
           const payment = order.payment
             ? await tx.payment.update({
                 where: { orderId: order.id },
                 data: {
-                  amount: order.total,
+                  amount: orderTotal,
                   method,
                   status: "PAID",
                   paidAt,
@@ -605,7 +630,7 @@ router.post(
             : await tx.payment.create({
                 data: {
                   orderId: order.id,
-                  amount: order.total,
+                  amount: orderTotal,
                   method,
                   status: "PAID",
                   paidAt,
@@ -649,6 +674,7 @@ router.post(
         return {
           payments,
           orders,
+          amounts,
           total,
           tableStatus,
         };
@@ -677,6 +703,11 @@ router.post(
 
         orderIds: result.orders.map((order) => order.id),
 
+        subtotal: result.amounts.subtotal,
+        cgstAmount: result.amounts.cgstAmount,
+        sgstAmount: result.amounts.sgstAmount,
+        gstAmount: result.amounts.gstAmount,
+        grandTotal: result.amounts.grandTotal,
         total: result.total,
 
         amountReceived: received,

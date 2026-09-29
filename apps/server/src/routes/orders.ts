@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
+import { calculateGstAmounts } from "../utils/gst.js";
 
 const router = Router();
 
@@ -640,21 +641,6 @@ router.patch(
           );
         }
 
-        if (currentOrder.payment) {
-          await tx.payment.update({
-            where: { orderId },
-            data: { amount: currentOrder.total },
-          });
-        } else {
-          await tx.payment.create({
-            data: {
-              orderId,
-              amount: currentOrder.total,
-              status: "PENDING",
-            },
-          });
-        }
-
         if (currentOrder.status === "READY_FOR_BILLING") {
           return tx.order.findUniqueOrThrow({
             where: { id: orderId },
@@ -667,9 +653,35 @@ router.patch(
           });
         }
 
+        const settings = await tx.restaurantSettings.upsert({
+          where: { id: 1 },
+          create: { id: 1, gstRate: 5 },
+          update: {},
+        });
+        const gstRate = Number(settings.gstRate);
+        const { grandTotal } = calculateGstAmounts(
+          Number(currentOrder.total),
+          gstRate,
+        );
+
+        if (currentOrder.payment) {
+          await tx.payment.update({
+            where: { orderId },
+            data: { amount: grandTotal },
+          });
+        } else {
+          await tx.payment.create({
+            data: {
+              orderId,
+              amount: grandTotal,
+              status: "PENDING",
+            },
+          });
+        }
+
         return tx.order.update({
           where: { id: orderId },
-          data: { status: "READY_FOR_BILLING" },
+          data: { status: "READY_FOR_BILLING", gstRate },
           include: {
             items: { include: { product: true } },
             table: true,

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
+import { calculateGstAmounts } from "../utils/gst.js";
 
 const router = Router();
 const admin = requireRoles("ADMIN", "MANAGER");
@@ -10,6 +11,42 @@ const id = (value: unknown) => Number.isInteger(Number(value)) && Number(value) 
 const text = (value: unknown) => typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 
 router.use(admin);
+
+router.get("/settings", async (_req, res) => {
+  const settings = await prisma.restaurantSettings.upsert({
+    where: { id: 1 },
+    create: { id: 1, gstRate: 5 },
+    update: {},
+  });
+
+  res.json({ gstRate: Number(settings.gstRate) });
+});
+
+router.patch("/settings", async (req, res) => {
+  const rawGstRate = req.body?.gstRate;
+  const gstRate = Number(rawGstRate);
+
+  if (
+    (typeof rawGstRate !== "number" && typeof rawGstRate !== "string") ||
+    (typeof rawGstRate === "string" && rawGstRate.trim() === "") ||
+    !Number.isFinite(gstRate) ||
+    gstRate < 0 ||
+    gstRate > 100 ||
+    Math.abs(gstRate * 100 - Math.round(gstRate * 100)) > 1e-8
+  ) {
+    return res.status(400).json({
+      message: "GST must be a number from 0 to 100 with at most 2 decimal places",
+    });
+  }
+
+  const settings = await prisma.restaurantSettings.upsert({
+    where: { id: 1 },
+    create: { id: 1, gstRate },
+    update: { gstRate },
+  });
+
+  return res.json({ gstRate: Number(settings.gstRate) });
+});
 
 router.get("/dashboard", async (_req, res) => {
   const [orders, completedOrders, revenue, products, categories, totalTables, availableTables, occupiedTables] = await Promise.all([
@@ -93,7 +130,24 @@ router.get("/tables", async (_req, res) => res.json(await prisma.restaurantTable
 router.post("/tables", async (req, res) => { const number = Number(req.body.number); if (!Number.isInteger(number) || number <= 0) return res.status(400).json({ message: "Valid table number is required" }); try { res.status(201).json(await prisma.restaurantTable.create({ data: { number } })); } catch { res.status(409).json({ message: "Table number already exists" }); } });
 router.patch("/tables/:id", async (req, res) => { const tableId = id(req.params.id), status = req.body.status; if (!tableId || !["AVAILABLE", "OCCUPIED", "RESERVED"].includes(status)) return res.status(400).json({ message: "Valid table ID and status are required" }); try { res.json(await prisma.restaurantTable.update({ where: { id: tableId }, data: { status } })); } catch { res.status(404).json({ message: "Table not found" }); } });
 
-router.get("/orders", async (_req, res) => res.json(await prisma.order.findMany({ include: { items: { include: { product: true } }, table: true, waiter: { select: safeUser }, payment: true }, orderBy: { createdAt: "desc" } })));
+router.get("/orders", async (_req, res) => {
+  const orders = await prisma.order.findMany({
+    include: {
+      items: { include: { product: true } },
+      table: true,
+      waiter: { select: safeUser },
+      payment: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.json(
+    orders.map((order) => ({
+      ...order,
+      ...calculateGstAmounts(Number(order.total), Number(order.gstRate)),
+    })),
+  );
+});
 router.get("/payments", async (_req, res) => res.json(await prisma.payment.findMany({ include: { order: true }, orderBy: { createdAt: "desc" } })));
 
 export default router;
