@@ -78,7 +78,17 @@ router.get(
         },
       });
 
-      return res.json(orders.map(withGstAmounts));
+      const settings = await prisma.restaurantSettings.findUnique({
+        where: { id: 1 },
+        select: { restaurantAddress: true },
+      });
+
+      return res.json(
+        orders.map((order) => ({
+          ...withGstAmounts(order),
+          restaurantAddress: settings?.restaurantAddress ?? "",
+        })),
+      );
     } catch (error) {
       console.error("Billing orders error:", error);
 
@@ -131,7 +141,17 @@ router.get(
         take: 50,
       });
 
-      return res.json(orders.map(withGstAmounts));
+      const settings = await prisma.restaurantSettings.findUnique({
+        where: { id: 1 },
+        select: { restaurantAddress: true },
+      });
+
+      return res.json(
+        orders.map((order) => ({
+          ...withGstAmounts(order),
+          restaurantAddress: settings?.restaurantAddress ?? "",
+        })),
+      );
     } catch (error) {
       console.error("Completed billing orders error:", error);
 
@@ -189,6 +209,11 @@ router.get(
         });
       }
 
+      const settings = await prisma.restaurantSettings.findUnique({
+        where: { id: 1 },
+        select: { restaurantAddress: true },
+      });
+
       return res.json({
         orderId: order.id,
         tableNumber: order.table.number,
@@ -200,6 +225,7 @@ router.get(
         items: order.items,
         total: order.total,
         ...orderGstAmounts(order),
+        restaurantAddress: settings?.restaurantAddress ?? "",
         payment: order.payment,
         createdAt: order.createdAt,
       });
@@ -461,6 +487,10 @@ router.get(
       }
 
       const amounts = sumGstAmounts(orders);
+      const settings = await prisma.restaurantSettings.findUnique({
+        where: { id: 1 },
+        select: { restaurantAddress: true },
+      });
 
       return res.json({
         tableId: table.id,
@@ -470,6 +500,7 @@ router.get(
           : `Table ${table.number}`,
         orderCount: orders.length,
         orders: orders.map(withGstAmounts),
+        restaurantAddress: settings?.restaurantAddress ?? "",
         ...amounts,
         total: amounts.grandTotal,
       });

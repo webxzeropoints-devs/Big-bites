@@ -19,33 +19,62 @@ router.get("/settings", async (_req, res) => {
     update: {},
   });
 
-  res.json({ gstRate: Number(settings.gstRate) });
+  res.json({
+    gstRate: Number(settings.gstRate),
+    restaurantAddress: settings.restaurantAddress,
+  });
 });
 
 router.patch("/settings", async (req, res) => {
-  const rawGstRate = req.body?.gstRate;
-  const gstRate = Number(rawGstRate);
+  const data: { gstRate?: number; restaurantAddress?: string } = {};
 
-  if (
-    (typeof rawGstRate !== "number" && typeof rawGstRate !== "string") ||
-    (typeof rawGstRate === "string" && rawGstRate.trim() === "") ||
-    !Number.isFinite(gstRate) ||
-    gstRate < 0 ||
-    gstRate > 100 ||
-    Math.abs(gstRate * 100 - Math.round(gstRate * 100)) > 1e-8
-  ) {
+  if (req.body?.gstRate !== undefined) {
+    const rawGstRate = req.body.gstRate;
+    const gstRate = Number(rawGstRate);
+
+    if (
+      (typeof rawGstRate !== "number" && typeof rawGstRate !== "string") ||
+      (typeof rawGstRate === "string" && rawGstRate.trim() === "") ||
+      !Number.isFinite(gstRate) ||
+      gstRate < 0 ||
+      gstRate > 100 ||
+      Math.abs(gstRate * 100 - Math.round(gstRate * 100)) > 1e-8
+    ) {
+      return res.status(400).json({
+        message: "GST must be a number from 0 to 100 with at most 2 decimal places",
+      });
+    }
+    data.gstRate = gstRate;
+  }
+
+  if (req.body?.restaurantAddress !== undefined) {
+    if (
+      typeof req.body.restaurantAddress !== "string" ||
+      req.body.restaurantAddress.length > 1000
+    ) {
+      return res.status(400).json({
+        message: "Restaurant address must be text up to 1000 characters",
+      });
+    }
+    data.restaurantAddress = req.body.restaurantAddress.trim();
+  }
+
+  if (Object.keys(data).length === 0) {
     return res.status(400).json({
-      message: "GST must be a number from 0 to 100 with at most 2 decimal places",
+      message: "Provide a valid GST rate or restaurant address",
     });
   }
 
   const settings = await prisma.restaurantSettings.upsert({
     where: { id: 1 },
-    create: { id: 1, gstRate },
-    update: { gstRate },
+    create: { id: 1, gstRate: data.gstRate ?? 5, restaurantAddress: data.restaurantAddress ?? "" },
+    update: data,
   });
 
-  return res.json({ gstRate: Number(settings.gstRate) });
+  return res.json({
+    gstRate: Number(settings.gstRate),
+    restaurantAddress: settings.restaurantAddress,
+  });
 });
 
 router.get("/dashboard", async (_req, res) => {
