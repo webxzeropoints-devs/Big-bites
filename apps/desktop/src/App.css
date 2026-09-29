@@ -172,6 +172,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   margin: 3px 0 0;
   font-size: 11px;
 }
+.receipt-header .receipt-address { white-space: pre-line; overflow-wrap: anywhere; }
 .receipt-divider {
   width: 100%;
   margin: 11px 0;
@@ -260,6 +261,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .sidebar-link:hover, .sidebar-link.active { background: rgba(212,162,76,.17); color: #f1cf8b; border-color: rgba(212,162,76,.28); }
 .nav-icon { display: inline-grid; place-items: center; width: 20px; color: currentColor; font-size: 17px; }
 .admin-main { min-width: 0; }
+.admin-main > .panel { padding: 22px; }
 .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 20px; }
 .stat-card { min-height: 116px; padding: 18px; border: 1px solid #e6e0d8; border-radius: 14px; background: #fff; box-shadow: 0 8px 20px rgba(40,31,20,.04); }
 .stat-card span { display: block; color: #777d84; font-size: 12px; font-weight: 700; }
@@ -283,9 +285,14 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .bill-summary-row > span { color: #737a83; }
 .bill-summary-row > strong { text-align: right; }
 .bill-summary .bill-total-row { margin-top: 4px; padding: 14px 0 4px; border-top: 1px solid #eee9e3; }
+.bill-restaurant-address { display: block; margin-top: 5px; color: #737a83; font-size: 12px; white-space: pre-line; overflow-wrap: anywhere; }
 .gst-settings-panel { padding: 22px; }
 .gst-settings-form { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto auto; align-items: end; gap: 12px; max-width: 900px; }
 .gst-settings-form > label { display: grid; gap: 7px; color: #666b72; font-size: 12px; font-weight: 700; }
+.gst-settings-form .address-field { grid-column: 1 / -1; }
+.gst-settings-form textarea { width: 100%; resize: vertical; border: 1px solid #ded8cf; border-radius: 8px; padding: 10px 11px; outline: none; background: #fff; color: #22272d; font: inherit; line-height: 1.5; }
+.gst-settings-form textarea:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(212,162,76,.14); }
+.gst-settings-form textarea:disabled { background: #f5f2ee; color: #737a83; }
 .gst-input-row { display: flex; align-items: center; gap: 9px; }
 .gst-input-row input { max-width: 180px; }
 .gst-input-row > span { color: #666b72; }

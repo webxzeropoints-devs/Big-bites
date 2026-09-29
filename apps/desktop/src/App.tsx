@@ -38,6 +38,7 @@ type Order = {
   sgstAmount?: number | string;
   gstAmount?: number | string;
   grandTotal?: number | string;
+  restaurantAddress?: string;
   createdAt: string;
   table: { id?: number; number: number; isParcel?: boolean };
   items: OrderItem[];
@@ -271,6 +272,9 @@ function ReceiptPreview({
         >
           <div className="receipt-header">
             <h2>{RESTAURANT_NAME}</h2>
+            {order.restaurantAddress && (
+              <p className="receipt-address">{order.restaurantAddress}</p>
+            )}
           </div>
 
           <hr className="receipt-divider" />
@@ -392,6 +396,14 @@ function BillingScreen({
       ]);
       setOrders(active);
       setCompleted(done);
+      setSelected((current) => {
+        if (!current) return current;
+        return (
+          active.find((order: Order) => order.id === current.id) ??
+          done.find((order: Order) => order.id === current.id) ??
+          current
+        );
+      });
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load billing orders");
@@ -572,6 +584,12 @@ function BillingScreen({
                 </div>
                 <span className="pill neutral">{tableLabel(selected.table).toUpperCase()}</span>
               </div>
+
+              {selected.restaurantAddress?.trim() && (
+                <div className="bill-restaurant-address">
+                  {selected.restaurantAddress}
+                </div>
+              )}
 
               <div className="bill-items">
                 {selected.items.map((item) => (
@@ -759,6 +777,7 @@ function AdminScreen({ token }: { token: string }) {
   });
   const [productQuery, setProductQuery] = useState("");
   const [gstRate, setGstRate] = useState("5");
+  const [restaurantAddress, setRestaurantAddress] = useState("");
   const [savingGst, setSavingGst] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState("");
   const [settingsError, setSettingsError] = useState("");
@@ -793,6 +812,7 @@ function AdminScreen({ token }: { token: string }) {
     try {
       const settings = await request("/api/admin/settings", {}, token);
       setGstRate(String(settings.gstRate));
+      setRestaurantAddress(settings.restaurantAddress ?? "");
       setSettingsLoaded(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unable to load GST settings";
@@ -819,13 +839,17 @@ function AdminScreen({ token }: { token: string }) {
         "/api/admin/settings",
         {
           method: "PATCH",
-          body: JSON.stringify({ gstRate: Number(gstRate) }),
+          body: JSON.stringify({
+            gstRate: Number(gstRate),
+            restaurantAddress,
+          }),
         },
         token,
       );
       setGstRate(String(settings.gstRate));
+      setRestaurantAddress(settings.restaurantAddress ?? "");
       setSettingsLoaded(true);
-      setSettingsMessage("GST setting saved.");
+      setSettingsMessage("Restaurant billing settings saved.");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unable to save GST setting";
       setSettingsError(
@@ -1289,7 +1313,7 @@ function AdminScreen({ token }: { token: string }) {
               <div className="panel-heading">
                 <div>
                   <div className="eyebrow">Billing configuration</div>
-                  <h3>GST Settings</h3>
+                  <h3>Restaurant &amp; Billing Settings</h3>
                 </div>
               </div>
               {settingsMessage && (
@@ -1323,6 +1347,21 @@ function AdminScreen({ token }: { token: string }) {
                   <span>CGST ({percent(Number(gstRate) / 2)})</span>
                   <span>SGST ({percent(Number(gstRate) / 2)})</span>
                 </div>
+                <label className="address-field">
+                  Restaurant address
+                  <textarea
+                    rows={3}
+                    maxLength={1000}
+                    placeholder="Enter the address to print on bills"
+                    value={restaurantAddress}
+                    onChange={(event) => {
+                      setRestaurantAddress(event.target.value);
+                      setSettingsMessage("");
+                      setSettingsError("");
+                    }}
+                    disabled={!settingsLoaded || savingGst}
+                  />
+                </label>
                 <button
                   className="secondary-btn"
                   disabled={settingsLoaded || savingGst}
@@ -1336,7 +1375,7 @@ function AdminScreen({ token }: { token: string }) {
                   disabled={!settingsLoaded || savingGst}
                   type="submit"
                 >
-                  {savingGst ? "Saving..." : "Save GST"}
+                  {savingGst ? "Saving..." : "Save settings"}
                 </button>
               </form>
             </section>

@@ -44,7 +44,7 @@ The Android emulator connects to the computer backend through `http://10.0.2.2:3
 
 ## 6. Billing
 
-The desktop Billing screen loads unpaid orders from `GET /api/billing/orders`. It displays order number, table or Parcel label, items, quantities, unit prices, subtotals, and grand total. Cashier selects `CASH`, `UPI`, or `CARD` and calls `POST /api/billing/orders/:id/pay`.
+The desktop Billing screen loads unpaid orders from `GET /api/billing/orders`. It displays order number, table or Parcel label, items, quantities, unit prices, subtotals, GST, and grand total. The configured restaurant address is shown on the bill and printed receipt. Cashier selects `CASH`, `UPI`, or `CARD` and calls `POST /api/billing/orders/:id/pay`.
 
 Payment is recorded as `PAID`, the order becomes `COMPLETED`, and the table becomes `AVAILABLE`.
 
@@ -57,12 +57,13 @@ The desktop Admin Panel uses the protected `/api/admin` routes and displays live
 - Tables and statuses
 - Order history
 - Payment records
+- GST rate and restaurant address settings for billing and printed receipts
 
 The current desktop UI allows adding a table, viewing categories, and viewing live product/inventory data through the backend. The backend also provides protected CRUD endpoints for categories, products, and users.
 
 ## 8. Database Design
 
-The Prisma schema contains `User`, `RestaurantTable`, `Category`, `Product`, `Order`, `OrderItem`, and `Payment`.
+The Prisma schema contains `User`, `RestaurantTable`, `Category`, `Product`, `Order`, `OrderItem`, `Payment`, and `RestaurantSettings`.
 
 - A user can create many orders.
 - A table or Parcel option can have many orders.
