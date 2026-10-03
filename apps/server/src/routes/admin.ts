@@ -22,11 +22,22 @@ router.get("/settings", async (_req, res) => {
   res.json({
     gstRate: Number(settings.gstRate),
     restaurantAddress: settings.restaurantAddress,
+    fssaiEnabled: settings.fssaiEnabled,
+    fssaiNumber: settings.fssaiNumber,
+    gstinEnabled: settings.gstinEnabled,
+    gstinNumber: settings.gstinNumber,
   });
 });
 
 router.patch("/settings", async (req, res) => {
-  const data: { gstRate?: number; restaurantAddress?: string } = {};
+  const data: {
+    gstRate?: number;
+    restaurantAddress?: string;
+    fssaiEnabled?: boolean;
+    fssaiNumber?: string;
+    gstinEnabled?: boolean;
+    gstinNumber?: string;
+  } = {};
 
   if (req.body?.gstRate !== undefined) {
     const rawGstRate = req.body.gstRate;
@@ -59,21 +70,85 @@ router.patch("/settings", async (req, res) => {
     data.restaurantAddress = req.body.restaurantAddress.trim();
   }
 
+  for (const field of ["fssaiEnabled", "gstinEnabled"] as const) {
+    if (req.body?.[field] !== undefined) {
+      if (typeof req.body[field] !== "boolean") {
+        return res.status(400).json({
+          message: `${field} must be a boolean`,
+        });
+      }
+      data[field] = req.body[field];
+    }
+  }
+
+  for (const field of ["fssaiNumber", "gstinNumber"] as const) {
+    if (req.body?.[field] !== undefined) {
+      const value = req.body[field];
+      if (typeof value !== "string" || value.trim().length > 100) {
+        return res.status(400).json({
+          message: `${field} must be text up to 100 characters`,
+        });
+      }
+      data[field] = value.trim();
+    }
+  }
+
+  const currentSettings = await prisma.restaurantSettings.findUnique({
+    where: { id: 1 },
+    select: {
+      fssaiEnabled: true,
+      fssaiNumber: true,
+      gstinEnabled: true,
+      gstinNumber: true,
+    },
+  });
+  const nextFssaiEnabled =
+    data.fssaiEnabled ?? currentSettings?.fssaiEnabled ?? false;
+  const nextFssaiNumber =
+    data.fssaiNumber ?? currentSettings?.fssaiNumber ?? "";
+  if (nextFssaiEnabled && !nextFssaiNumber.trim()) {
+    return res.status(400).json({
+      message: "Enter the FSSAI number before enabling FSSAI",
+    });
+  }
+
+  const nextGstinEnabled =
+    data.gstinEnabled ?? currentSettings?.gstinEnabled ?? false;
+  const nextGstinNumber =
+    data.gstinNumber ?? currentSettings?.gstinNumber ?? "";
+  if (nextGstinEnabled && !nextGstinNumber.trim()) {
+    return res.status(400).json({
+      message: "Enter the GSTIN number before enabling GSTIN",
+    });
+  }
+
   if (Object.keys(data).length === 0) {
     return res.status(400).json({
-      message: "Provide a valid GST rate or restaurant address",
+      message: "Provide at least one valid restaurant setting",
     });
   }
 
   const settings = await prisma.restaurantSettings.upsert({
     where: { id: 1 },
-    create: { id: 1, gstRate: data.gstRate ?? 5, restaurantAddress: data.restaurantAddress ?? "" },
+    create: {
+      id: 1,
+      gstRate: data.gstRate ?? 5,
+      restaurantAddress: data.restaurantAddress ?? "",
+      fssaiEnabled: data.fssaiEnabled ?? false,
+      fssaiNumber: data.fssaiNumber ?? "",
+      gstinEnabled: data.gstinEnabled ?? false,
+      gstinNumber: data.gstinNumber ?? "",
+    },
     update: data,
   });
 
   return res.json({
     gstRate: Number(settings.gstRate),
     restaurantAddress: settings.restaurantAddress,
+    fssaiEnabled: settings.fssaiEnabled,
+    fssaiNumber: settings.fssaiNumber,
+    gstinEnabled: settings.gstinEnabled,
+    gstinNumber: settings.gstinNumber,
   });
 });
 

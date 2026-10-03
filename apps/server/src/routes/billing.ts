@@ -1,32 +1,65 @@
 import { Router } from "express";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
+import type { DiscountType } from "@prisma/client";
 import { calculateGstAmounts } from "../utils/gst.js";
+import { calculateDiscount, type DiscountKind } from "../utils/discount.js";
 
 const router = Router();
 
-type TaxableOrder = { total: unknown; gstRate: unknown };
+type TaxableOrder = {
+  total: unknown;
+  gstRate: unknown;
+  discountType?: DiscountType | null;
+  discountValue?: unknown;
+  discountAmount?: unknown;
+};
 
 const orderGstAmounts = (order: TaxableOrder) =>
   calculateGstAmounts(Number(order.total), Number(order.gstRate));
 
-const withGstAmounts = <T extends TaxableOrder>(order: T) => ({
-  ...order,
-  ...orderGstAmounts(order),
-});
+const orderDiscountAmounts = (order: TaxableOrder) => {
+  const amounts = orderGstAmounts(order);
+  return calculateDiscount(
+    amounts.grandTotal,
+    order.discountType ?? null,
+    order.discountValue == null ? null : Number(order.discountValue),
+  );
+};
+
+const withGstAmounts = <T extends TaxableOrder>(order: T) => {
+  const amounts = orderGstAmounts(order);
+  const discount = orderDiscountAmounts(order);
+  const discountAmount = Number(order.discountAmount ?? discount.discountAmount);
+  return {
+    ...order,
+    ...amounts,
+    discountAmount,
+    finalTotal: Math.round((amounts.grandTotal - discountAmount + Number.EPSILON) * 100) / 100,
+  };
+};
 
 function sumGstAmounts(orders: TaxableOrder[]) {
   const amounts = orders.map(orderGstAmounts);
-  const sumCurrency = (select: (amount: (typeof amounts)[number]) => number) =>
-    amounts.reduce((sum, amount) => sum + Math.round(select(amount) * 100), 0) /
-    100;
+  const sumCurrency = (
+    select: (amount: (typeof amounts)[number], index: number) => number,
+  ) =>
+    amounts.reduce(
+      (sum, amount, index) => sum + Math.round(select(amount, index) * 100),
+      0,
+    ) / 100;
   const subtotal = sumCurrency((amount) => amount.subtotal);
   const cgstAmount = sumCurrency((amount) => amount.cgstAmount);
   const sgstAmount = sumCurrency((amount) => amount.sgstAmount);
   const gstAmount = sumCurrency((amount) => amount.gstAmount);
-  const grandTotal = sumCurrency((amount) => amount.grandTotal);
+  const discountAmount = sumCurrency((_, index) =>
+    Number(orders[index].discountAmount ?? 0),
+  );
+  const grandTotal = sumCurrency((amount, index) =>
+    amount.grandTotal - Number(orders[index].discountAmount ?? 0),
+  );
 
-  return { subtotal, cgstAmount, sgstAmount, gstAmount, grandTotal };
+  return { subtotal, cgstAmount, sgstAmount, gstAmount, discountAmount, grandTotal };
 }
 
 class BillingRequestError extends Error {
@@ -80,13 +113,23 @@ router.get(
 
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
-        select: { restaurantAddress: true },
+        select: {
+          restaurantAddress: true,
+          fssaiEnabled: true,
+          fssaiNumber: true,
+          gstinEnabled: true,
+          gstinNumber: true,
+        },
       });
 
       return res.json(
         orders.map((order) => ({
           ...withGstAmounts(order),
           restaurantAddress: settings?.restaurantAddress ?? "",
+          fssaiEnabled: settings?.fssaiEnabled ?? false,
+          fssaiNumber: settings?.fssaiNumber ?? "",
+          gstinEnabled: settings?.gstinEnabled ?? false,
+          gstinNumber: settings?.gstinNumber ?? "",
         })),
       );
     } catch (error) {
@@ -143,13 +186,23 @@ router.get(
 
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
-        select: { restaurantAddress: true },
+        select: {
+          restaurantAddress: true,
+          fssaiEnabled: true,
+          fssaiNumber: true,
+          gstinEnabled: true,
+          gstinNumber: true,
+        },
       });
 
       return res.json(
         orders.map((order) => ({
           ...withGstAmounts(order),
           restaurantAddress: settings?.restaurantAddress ?? "",
+          fssaiEnabled: settings?.fssaiEnabled ?? false,
+          fssaiNumber: settings?.fssaiNumber ?? "",
+          gstinEnabled: settings?.gstinEnabled ?? false,
+          gstinNumber: settings?.gstinNumber ?? "",
         })),
       );
     } catch (error) {
@@ -211,7 +264,13 @@ router.get(
 
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
-        select: { restaurantAddress: true },
+        select: {
+          restaurantAddress: true,
+          fssaiEnabled: true,
+          fssaiNumber: true,
+          gstinEnabled: true,
+          gstinNumber: true,
+        },
       });
 
       return res.json({
@@ -225,7 +284,14 @@ router.get(
         items: order.items,
         total: order.total,
         ...orderGstAmounts(order),
+        discountType: order.discountType,
+        discountValue: order.discountValue,
+        discountAmount: order.discountAmount,
         restaurantAddress: settings?.restaurantAddress ?? "",
+        fssaiEnabled: settings?.fssaiEnabled ?? false,
+        fssaiNumber: settings?.fssaiNumber ?? "",
+        gstinEnabled: settings?.gstinEnabled ?? false,
+        gstinNumber: settings?.gstinNumber ?? "",
         payment: order.payment,
         createdAt: order.createdAt,
       });
@@ -235,6 +301,122 @@ router.get(
       return res.status(500).json({
         message: "Failed to fetch bill",
       });
+    }
+  },
+);
+
+router.patch(
+  "/orders/:id/discount",
+  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  async (req, res) => {
+    try {
+      const orderId = Number(req.params.id);
+      if (!Number.isInteger(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const rawType = req.body?.discountType;
+      const rawValue = req.body?.discountValue;
+      if (
+        rawType !== null &&
+        rawType !== "AMOUNT" &&
+        rawType !== "PERCENTAGE"
+      ) {
+        return res.status(400).json({
+          message: "Discount type must be AMOUNT, PERCENTAGE, or null",
+        });
+      }
+
+      let discountValue: number | null = null;
+      if (rawValue !== null && rawValue !== undefined && rawValue !== "") {
+        if (
+          (typeof rawValue !== "number" && typeof rawValue !== "string") ||
+          (typeof rawValue === "string" && rawValue.trim() === "") ||
+          !Number.isFinite(Number(rawValue))
+        ) {
+          return res.status(400).json({
+            message: "Discount must be a valid non-negative number",
+          });
+        }
+        discountValue = Number(rawValue);
+      }
+
+      if ((rawType === null) !== (discountValue === null)) {
+        return res.status(400).json({
+          message: "Select a discount type and enter a discount value",
+        });
+      }
+      if (discountValue !== null && discountValue < 0) {
+        return res.status(400).json({
+          message: "Discount must be a valid non-negative number",
+        });
+      }
+      if (
+        discountValue !== null &&
+        Math.abs(discountValue * 100 - Math.round(discountValue * 100)) > 1e-8
+      ) {
+        return res.status(400).json({
+          message: "Discount can have at most 2 decimal places",
+        });
+      }
+
+      const updated = await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Order"
+          WHERE "id" = ${orderId}
+          FOR UPDATE
+        `;
+
+        const order = await tx.order.findUnique({ where: { id: orderId } });
+        if (!order) {
+          throw new BillingRequestError(404, "Order not found");
+        }
+        if (order.status !== "READY_FOR_BILLING") {
+          throw new BillingRequestError(
+            409,
+            "Discounts can only be changed before payment",
+          );
+        }
+
+        let discount;
+        try {
+          discount = calculateDiscount(
+            orderGstAmounts(order).grandTotal,
+            rawType as DiscountKind | null,
+            discountValue,
+          );
+        } catch (error) {
+          throw new BillingRequestError(
+            400,
+            error instanceof Error ? error.message : "Invalid discount",
+          );
+        }
+
+        const nextType = rawType as DiscountType | null;
+        const saved = await tx.order.update({
+          where: { id: orderId },
+          data: {
+            discountType: nextType,
+            discountValue,
+            discountAmount: discount.discountAmount,
+          },
+        });
+        return { saved, discount };
+      });
+
+      return res.json({
+        discountType: updated.saved.discountType,
+        discountValue: updated.saved.discountValue,
+        discountAmount: updated.saved.discountAmount,
+        finalTotal: updated.discount.grandTotal,
+      });
+    } catch (error) {
+      if (error instanceof BillingRequestError) {
+        return res.status(error.statusCode).json({ message: error.message });
+      }
+      console.error("Order discount error:", error);
+      return res.status(500).json({ message: "Failed to save bill discount" });
     }
   },
 );
@@ -324,7 +506,13 @@ router.post(
         }
 
         const gstAmounts = orderGstAmounts(order);
-        const total = gstAmounts.grandTotal;
+        const discountAmounts = orderDiscountAmounts(order);
+        const total = Math.round(
+          (gstAmounts.grandTotal -
+            Number(order.discountAmount ?? discountAmounts.discountAmount) +
+            Number.EPSILON) *
+            100,
+        ) / 100;
         if (
           method === "CASH" &&
           parsedAmountReceived !== undefined &&
@@ -391,16 +579,17 @@ router.post(
           });
         }
 
-        return { payment, order: updatedOrder, ...gstAmounts };
+        return { payment, order: updatedOrder, ...gstAmounts, discountAmounts };
       });
 
-      const received = parsedAmountReceived ?? result.grandTotal;
+      const received = parsedAmountReceived ?? result.discountAmounts.grandTotal;
       return res.json({
         message: "Payment received",
         ...result,
-        total: result.grandTotal,
+        total: result.discountAmounts.grandTotal,
+        finalTotal: result.discountAmounts.grandTotal,
         amountReceived: received,
-        change: method === "CASH" ? received - result.grandTotal : 0,
+        change: method === "CASH" ? received - result.discountAmounts.grandTotal : 0,
       });
     } catch (error) {
       if (error instanceof BillingRequestError) {
@@ -489,7 +678,13 @@ router.get(
       const amounts = sumGstAmounts(orders);
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
-        select: { restaurantAddress: true },
+        select: {
+          restaurantAddress: true,
+          fssaiEnabled: true,
+          fssaiNumber: true,
+          gstinEnabled: true,
+          gstinNumber: true,
+        },
       });
 
       return res.json({
@@ -501,6 +696,10 @@ router.get(
         orderCount: orders.length,
         orders: orders.map(withGstAmounts),
         restaurantAddress: settings?.restaurantAddress ?? "",
+        fssaiEnabled: settings?.fssaiEnabled ?? false,
+        fssaiNumber: settings?.fssaiNumber ?? "",
+        gstinEnabled: settings?.gstinEnabled ?? false,
+        gstinNumber: settings?.gstinNumber ?? "",
         ...amounts,
         total: amounts.grandTotal,
       });
@@ -647,7 +846,12 @@ router.post(
           }
 
           const paidAt = new Date();
-          const orderTotal = orderGstAmounts(order).grandTotal;
+          const orderTotal = Math.round(
+            (orderGstAmounts(order).grandTotal -
+              Number(order.discountAmount ?? 0) +
+              Number.EPSILON) *
+              100,
+          ) / 100;
           const payment = order.payment
             ? await tx.payment.update({
                 where: { orderId: order.id },
