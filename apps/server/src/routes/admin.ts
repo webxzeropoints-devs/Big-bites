@@ -252,6 +252,74 @@ router.get("/orders", async (_req, res) => {
     })),
   );
 });
+router.delete("/orders/:id", requireRoles("ADMIN"), async (req, res) => {
+  const orderId = id(req.params.id);
+  if (!orderId) return res.status(400).json({ message: "Invalid order ID" });
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { tableId: true },
+      });
+      if (!order) {
+        throw new Error("ORDER_NOT_FOUND");
+      }
+
+      await tx.$queryRaw`
+        SELECT "id"
+        FROM "RestaurantTable"
+        WHERE "id" = ${order.tableId}
+        FOR UPDATE
+      `;
+
+      await tx.$queryRaw`
+        SELECT "id"
+        FROM "Order"
+        WHERE "id" = ${orderId}
+        FOR UPDATE
+      `;
+
+      const currentOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { id: true, tableId: true },
+      });
+      if (!currentOrder) {
+        throw new Error("ORDER_NOT_FOUND");
+      }
+
+      await tx.payment.deleteMany({ where: { orderId } });
+      await tx.order.delete({ where: { id: orderId } });
+
+      const otherActiveOrder = await tx.order.findFirst({
+        where: {
+          tableId: currentOrder.tableId,
+          status: { notIn: ["COMPLETED", "CANCELLED"] },
+        },
+        select: { id: true },
+      });
+      const table = await tx.restaurantTable.findUnique({
+        where: { id: currentOrder.tableId },
+        select: { status: true },
+      });
+
+      if (!otherActiveOrder && table?.status === "OCCUPIED") {
+        await tx.restaurantTable.update({
+          where: { id: currentOrder.tableId },
+          data: { status: "AVAILABLE" },
+        });
+      }
+    });
+
+    return res.status(204).send();
+  } catch (error) {
+    if (error instanceof Error && error.message === "ORDER_NOT_FOUND") {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    console.error("Delete order error:", error);
+    return res.status(500).json({ message: "Failed to delete order" });
+  }
+});
 router.get("/payments", async (_req, res) => res.json(await prisma.payment.findMany({ include: { order: true }, orderBy: { createdAt: "desc" } })));
 
 export default router;
