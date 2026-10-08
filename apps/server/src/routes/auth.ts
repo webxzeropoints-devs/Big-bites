@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { prisma } from "../config/database.js";
 import { createToken } from "../middleware/auth.js";
+import {
+  hashPassword,
+  isPasswordHash,
+  verifyPassword,
+} from "../utils/password.js";
 
 const router = Router();
 
@@ -9,8 +14,12 @@ router.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    // Check required fields
-    if (!username || !password) {
+    if (
+      typeof username !== "string" ||
+      !username ||
+      typeof password !== "string" ||
+      !password
+    ) {
       return res.status(400).json({
         message: "Username and password are required",
       });
@@ -23,15 +32,21 @@ router.post("/login", async (req, res) => {
       },
     });
 
-    // Check username/password
-    if (!user || user.password !== password) {
+    if (!user || !(await verifyPassword(password, user.password))) {
       return res.status(401).json({
         message: "Invalid username or password",
       });
     }
 
-    // Login successful
-    res.json({
+    if (!isPasswordHash(user.password)) {
+      const upgradedPassword = await hashPassword(password);
+      await prisma.user.updateMany({
+        where: { id: user.id, password: user.password },
+        data: { password: upgradedPassword },
+      });
+    }
+
+    return res.json({
       message: "Login successful",
       token: createToken({ id: user.id, username: user.username, role: user.role }),
       user: {

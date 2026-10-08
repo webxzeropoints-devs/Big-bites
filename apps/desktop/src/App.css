@@ -52,6 +52,7 @@ button { cursor: pointer; }
 .secondary-btn { background: #fff; color: #343a42; border-color: #ddd8d0; }
 .secondary-btn:hover { border-color: #c69a53; color: #8a6324; }
 .danger-btn { background: #fff3f1; color: #b6433c; border-color: #efc9c4; }
+button:disabled { cursor: not-allowed; opacity: .6; }
 .small { padding: 7px 10px; font-size: 12px; }
 .full { width: 100%; }
 
@@ -157,22 +158,50 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   line-height: 1.35;
 }
 .receipt-header,
-.receipt-footer {
+.receipt-footer,
+.receipt-tax-invoice {
   text-align: center;
+}
+.receipt-logo {
+  display: block;
+  width: min(55mm, 100%);
+  max-height: 30mm;
+  height: auto;
+  object-fit: contain;
+  margin: 0 auto 8px;
 }
 .receipt-header h2 {
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 800;
   line-height: 1.2;
   letter-spacing: .02em;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+.receipt-tax-invoice {
+  margin: 6px 0 10px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.receipt-tax-id {
+  margin: 3px 0;
+  text-align: center;
   overflow-wrap: anywhere;
 }
 .receipt-header p {
   margin: 3px 0 0;
   font-size: 11px;
 }
-.receipt-header .receipt-address { margin: 4px 0 0; text-align: center; white-space: pre-line; overflow-wrap: anywhere; }
+.receipt-address {
+  margin: 10px 0 0;
+  text-align: center;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
 .receipt-divider {
   width: 100%;
   margin: 11px 0;
@@ -185,31 +214,31 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 }
 .receipt-details > div,
 .receipt-summary-row {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-}
-.receipt-details span,
-.receipt-summary-row span {
-  flex: 0 0 auto;
 }
 .receipt-details strong,
 .receipt-summary-row strong {
   text-align: right;
   overflow-wrap: anywhere;
+  min-width: 0;
 }
 .receipt-items {
   display: grid;
 }
 .receipt-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 28px 54px 62px;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) 24px 70px 70px;
+  gap: 3px;
   align-items: start;
   padding: 5px 0;
 }
 .receipt-row > :not(:first-child) {
   text-align: right;
+}
+.receipt-row > :nth-child(2) {
+  text-align: center;
 }
 .receipt-heading {
   padding: 0 0 6px;
@@ -220,21 +249,28 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.receipt-item-divider {
+  width: 100%;
+  border-top: 1px dashed #333;
+  margin: 2px 0 0;
+}
 .receipt-summary {
   display: grid;
   gap: 5px;
 }
 .receipt-total {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
   gap: 8px;
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 800;
 }
 .receipt-total strong {
-  font-size: 18px;
-  white-space: nowrap;
+  max-width: 100%;
+  font-size: 22px;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 .receipt-payment {
   margin: 0;
@@ -242,12 +278,23 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 }
 .receipt-footer {
   display: grid;
-  gap: 3px;
+  gap: 6px;
   padding: 2px 0 0;
 }
 .receipt-footer strong {
   font-size: 13px;
+  font-weight: 800;
   text-transform: uppercase;
+}
+.receipt-branding {
+  margin-top: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.receipt-website {
+  text-align: center;
+  font-size: 11px;
 }
 
 .admin-shell { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 20px; align-items: start; }
@@ -256,6 +303,8 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .sidebar-brand strong { min-width: 0; font-size: 13px; line-height: 1.3; letter-spacing: .02em; overflow-wrap: anywhere; }
 .brand-circle { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: #f3e2bd; color: #6f501c; font-size: 20px; }
 .brand-circle.small { width: 32px; height: 32px; border-radius: 9px; font-size: 15px; }
+.brand-logo { width: 58px; height: 58px; flex: 0 0 auto; object-fit: contain; }
+.brand-logo.small { width: 38px; height: 38px; }
 .sidebar-nav { display: grid; gap: 6px; padding-top: 18px; }
 .sidebar-link { display: flex; align-items: center; gap: 10px; width: 100%; padding: 11px 10px; color: #aeb4bb; text-align: left; font-size: 12px; }
 .sidebar-link:hover, .sidebar-link.active { background: rgba(212,162,76,.17); color: #f1cf8b; border-color: rgba(212,162,76,.28); }
@@ -286,10 +335,17 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .bill-summary-row > strong { text-align: right; }
 .bill-summary .bill-total-row { margin-top: 4px; padding: 14px 0 4px; border-top: 1px solid #eee9e3; }
 .bill-restaurant-address { display: block; margin-top: 5px; color: #737a83; font-size: 12px; white-space: pre-line; overflow-wrap: anywhere; }
+.discount-controls { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(140px, 1fr); gap: 12px; margin: 14px 0; }
+.discount-controls label { display: grid; gap: 7px; color: #666b72; font-size: 12px; font-weight: 700; }
 .gst-settings-panel { padding: 22px; }
 .gst-settings-form { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto auto; align-items: end; gap: 12px; max-width: 900px; }
+.report-location { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; margin: 18px 0; padding: 16px; border: 1px solid #eee9e3; border-radius: 12px; }
+.report-location > div { display: grid; gap: 6px; min-width: 0; }
+.report-folder-path { overflow-wrap: anywhere; }
 .gst-settings-form > label { display: grid; gap: 7px; color: #666b72; font-size: 12px; font-weight: 700; }
 .gst-settings-form .address-field { grid-column: 1 / -1; }
+.gst-settings-form .setting-toggle { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 12px; }
+.gst-settings-form .setting-toggle input[type="checkbox"] { width: 18px; height: 18px; margin: 0; }
 .gst-settings-form textarea { width: 100%; resize: vertical; border: 1px solid #ded8cf; border-radius: 8px; padding: 10px 11px; outline: none; background: #fff; color: #22272d; font: inherit; line-height: 1.5; }
 .gst-settings-form .address-field small { color: #8a8f96; font-size: 11px; font-weight: 500; }
 .gst-settings-form textarea:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(212,162,76,.14); }
@@ -348,6 +404,9 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   .payment-row-details { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .gst-settings-form { grid-template-columns: 1fr; align-items: stretch; }
   .gst-settings-form > button { width: 100%; }
+  .discount-controls { grid-template-columns: 1fr; }
+  .report-location { grid-template-columns: 1fr; }
+  .report-location > button { width: 100%; }
 }
 
 @media print {
@@ -413,5 +472,9 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 
   .receipt-divider {
     border-top-style: dashed;
+  }
+
+  .receipt-logo {
+    filter: grayscale(1) contrast(1.8);
   }
 }

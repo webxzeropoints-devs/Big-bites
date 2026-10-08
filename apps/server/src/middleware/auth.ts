@@ -4,7 +4,23 @@ import { UserRole } from "@prisma/client";
 
 export type AuthUser = { id: number; username: string; role: UserRole };
 
-const getSecret = () => process.env.AUTH_SECRET ?? "hotel-pos-development-secret";
+let developmentSecret: string | undefined;
+
+function getSecret(): string {
+  const configuredSecret = process.env.AUTH_SECRET?.trim();
+  if (configuredSecret) return configuredSecret;
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("AUTH_SECRET must be configured in production");
+  }
+
+  developmentSecret ??= crypto.randomBytes(32).toString("hex");
+  return developmentSecret;
+}
+
+export function validateAuthSecret(): void {
+  getSecret();
+}
 
 export function createToken(user: AuthUser): string {
   const payload = Buffer.from(JSON.stringify(user)).toString("base64url");

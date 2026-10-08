@@ -24,3 +24,5 @@ Thumbs.db
 **/macos/Flutter/ephemeral/
 **/windows/flutter/ephemeral/
 apps/server/hotel_pos_backup.dump
+apps/server/*.dump
+structure.txt

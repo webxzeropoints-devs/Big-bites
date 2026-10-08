@@ -8,7 +8,6 @@ datasource db {
 
 enum UserRole {
   ADMIN
-  MANAGER
   CASHIER
   WAITER
 }
@@ -99,6 +98,7 @@ model Order {
   status    OrderStatus @default(PENDING)
   total     Decimal     @default(0) @db.Decimal(10, 2)
   gstRate   Decimal     @default(0) @db.Decimal(5, 2)
+  gstEnabled Boolean    @default(true)
   discountType   DiscountType?
   discountValue  Decimal?      @db.Decimal(10, 2)
   discountAmount Decimal       @default(0) @db.Decimal(10, 2)
@@ -118,6 +118,8 @@ model Order {
 model RestaurantSettings {
   id                Int      @id @default(1)
   gstRate           Decimal  @default(5) @db.Decimal(5, 2)
+  gstEnabled        Boolean  @default(true)
+  orderReportsPath  String   @default("")
   restaurantAddress String   @default("")
   fssaiEnabled      Boolean  @default(false)
   fssaiNumber       String   @default("")
@@ -141,12 +143,14 @@ model OrderItem {
 }
 
 model Payment {
-  id        Int           @id @default(autoincrement())
-  amount    Decimal       @db.Decimal(10, 2)
-  method    PaymentMethod?
-  status    PaymentStatus @default(PENDING)
-  paidAt    DateTime?
-  createdAt DateTime      @default(now())
+  id             Int           @id @default(autoincrement())
+  amount         Decimal       @db.Decimal(10, 2)
+  amountReceived Decimal?      @db.Decimal(10, 2)
+  change         Decimal?      @db.Decimal(10, 2)
+  method         PaymentMethod?
+  status         PaymentStatus @default(PENDING)
+  paidAt         DateTime?
+  createdAt      DateTime      @default(now())
 
   orderId Int   @unique
   order   Order @relation(fields: [orderId], references: [id])

@@ -1,13 +1,33 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  Component,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ErrorInfo,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  calculateAmounts,
+  calculateDiscountAmount,
+  minorUnitsToNumber,
+  parseMinorUnits,
+  sumMinorUnits,
+} from "./utils/currency";
 import "./App.css";
 
 const API_URL =
-  import.meta.env.VITE_API_URL ?? "https://big-bites-server.onrender.com";
+  (import.meta.env.VITE_API_URL || "http://localhost:3000").replace(/\/$/, "");
 const RESTAURANT_NAME = "BIG BITES FAMILY RESTAURANT";
+const RECEIPT_RESTAURANT_NAME = "BIG BITES FAMILY\nRESTAURANT";
+type DiscountKind = "AMOUNT" | "PERCENTAGE";
 
-type Screen = "billing" | "admin";
-type User = { id: number; name: string; username: string; role: string };
+type Screen = "billing" | "admin" | "waiter";
+type UserRole = "ADMIN" | "CASHIER" | "WAITER";
+type User = { id: number; name: string; username: string; role: UserRole };
 type Category = { id: number; name: string; _count?: { products: number } };
 type Product = {
   id: number;
@@ -18,6 +38,7 @@ type Product = {
   categoryId: number;
   category?: { id: number; name: string };
 };
+
 type Table = { id: number; number: number; status: string; isParcel?: boolean };
 type OrderItem = {
   id: number;
@@ -31,7 +52,9 @@ type Order = {
   status: string;
   total: string | number;
   subtotal?: number | string;
+  taxableSubtotal?: number | string;
   gstRate?: number | string;
+  gstEnabled?: boolean;
   cgstRate?: number | string;
   sgstRate?: number | string;
   cgstAmount?: number | string;
@@ -39,10 +62,24 @@ type Order = {
   gstAmount?: number | string;
   grandTotal?: number | string;
   restaurantAddress?: string;
+  fssaiEnabled?: boolean;
+  fssaiNumber?: string;
+  gstinEnabled?: boolean;
+  gstinNumber?: string;
+  discountType?: DiscountKind | null;
+  discountValue?: number | string | null;
+  discountAmount?: number | string;
   createdAt: string;
-  table: { id?: number; number: number; isParcel?: boolean };
-  items: OrderItem[];
-  payment?: { method: string; status: string; paidAt?: string | null } | null;
+  table?: { id?: number; number: number; isParcel?: boolean } | null;
+  items?: OrderItem[];
+  payment?: {
+    amount?: string | number;
+    amountReceived?: string | number | null;
+    change?: string | number | null;
+    method: string;
+    status: string;
+    paidAt?: string | null;
+  } | null;
 };
 type Dashboard = {
   openOrders: number;
@@ -54,26 +91,120 @@ type Dashboard = {
   availableTables: number;
   occupiedTables: number;
 };
+type OrderReportsSummary = {
+  folderPath: string;
+  folderAvailable: boolean;
+  folderError: string;
+  months: {
+    month: string;
+    fileName: string;
+    orderCount: number;
+    totalIncome: number;
+    fileExists: boolean;
+    exportedAt: string | null;
+  }[];
+};
 
-const tableLabel = (table: { number: number; isParcel?: boolean }) =>
-  table.isParcel ? "Parcel" : `Table ${table.number}`;
+const tableLabel = (table?: { number: number; isParcel?: boolean } | null) =>
+  table ? (table.isParcel ? "Parcel" : `Table ${table.number}`) : "Table unavailable";
+
+class AppErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("POS screen render error:", error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <main
+          role="alert"
+          style={{
+            boxSizing: "border-box",
+            minHeight: "100vh",
+            padding: 32,
+            background: "#f5f2ee",
+            color: "#20242a",
+            fontFamily: "Arial, Helvetica, sans-serif",
+          }}
+        >
+          <h1>BIG BITES POS could not display this screen</h1>
+          <p>{this.state.error.message}</p>
+          <button onClick={() => window.location.reload()}>Reload POS</button>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const money = (value: string | number) => `₹${Number(value).toFixed(2)}`;
 const percent = (value: string | number) => {
   const numericValue = Number(value);
   return `${numericValue.toFixed(Number.isInteger(numericValue) ? 0 : 2)}%`;
 };
+const orderAmounts = (order: Order) => {
+  const subtotal = order.subtotal ?? order.total;
+  const discountMinor =
+    order.discountType && order.discountValue != null
+      ? calculateDiscountAmount(
+          subtotal,
+          order.discountType,
+          String(order.discountValue),
+        )
+      : parseMinorUnits(order.discountAmount ?? 0);
+  if (discountMinor === null) throw new Error("Invalid order discount");
+  return calculateAmounts(
+    subtotal,
+    order.gstRate ?? 0,
+    minorUnitsToNumber(discountMinor),
+  );
+};
 
-const orderAmounts = (order: Order) => ({
-  subtotal: Number(order.subtotal ?? order.total),
-  gstRate: Number(order.gstRate ?? 0),
-  cgstRate: Number(order.cgstRate ?? 0),
-  sgstRate: Number(order.sgstRate ?? 0),
-  cgstAmount: Number(order.cgstAmount ?? 0),
-  sgstAmount: Number(order.sgstAmount ?? 0),
-  gstAmount: Number(order.gstAmount ?? 0),
-  grandTotal: Number(order.grandTotal ?? order.total),
-});
+function calculateEnteredDiscount(
+  subtotal: number | string,
+  gstRate: number | string,
+  type: DiscountKind,
+  rawValue: string,
+) : { discountAmount: number; grandTotal: number } | null {
+  const discountMinor = calculateDiscountAmount(subtotal, type, rawValue);
+  if (discountMinor === null) return null;
+  const amounts = calculateAmounts(
+    subtotal,
+    gstRate,
+    minorUnitsToNumber(discountMinor),
+  );
+  return {
+    discountAmount: amounts.discountAmount,
+    grandTotal: amounts.grandTotal,
+  };
+}
+
+async function checkApiHealth() {
+  try {
+    const response = await fetch(`${API_URL}/health`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const data = await response.json().catch(() => null);
+    return data?.status === "OK" && data?.database === "Connected";
+  } catch {
+    return false;
+  }
+}
 
 async function request(path: string, options: RequestInit = {}, token?: string) {
   const headers = new Headers(options.headers);
@@ -90,7 +221,7 @@ async function request(path: string, options: RequestInit = {}, token?: string) 
   return data;
 }
 
-function App() {
+function AppContent() {
   const [screen, setScreen] = useState<Screen>("billing");
   const [token, setToken] = useState("");
   const [user, setUser] = useState<User | null>(null);
@@ -101,7 +232,7 @@ function App() {
         onLogin={(nextToken, nextUser) => {
           setToken(nextToken);
           setUser(nextUser);
-          setScreen(nextUser.role === "ADMIN" || nextUser.role === "MANAGER" ? "admin" : "billing");
+          setScreen(nextUser.role === "ADMIN" ? "admin" : "billing");
         }}
       />
     );
@@ -122,13 +253,21 @@ function App() {
           >
             Billing
           </button>
-          {(user.role === "ADMIN" || user.role === "MANAGER") && (
-            <button
-              className={screen === "admin" ? "nav-btn active" : "nav-btn"}
-              onClick={() => setScreen("admin")}
-            >
-              Admin
-            </button>
+          {user.role === "ADMIN" && (
+            <>
+              <button
+                className={screen === "admin" ? "nav-btn active" : "nav-btn"}
+                onClick={() => setScreen("admin")}
+              >
+                Admin
+              </button>
+              <button
+                className={screen === "waiter" ? "nav-btn active" : "nav-btn"}
+                onClick={() => setScreen("waiter")}
+              >
+                Waiter
+              </button>
+            </>
           )}
           <button
             className="nav-btn ghost"
@@ -144,10 +283,20 @@ function App() {
 
       {screen === "billing" ? (
         <BillingScreen token={token} cashierName={user.name} />
+      ) : screen === "waiter" ? (
+        <WaiterModeScreen token={token} />
       ) : (
-        <AdminScreen token={token} />
+        <AdminScreen token={token} role={user.role} />
       )}
     </div>
+  );
+}
+
+function App() {
+  return (
+    <AppErrorBoundary>
+      <AppContent />
+    </AppErrorBoundary>
   );
 }
 
@@ -155,12 +304,50 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [checkingConnection, setCheckingConnection] = useState(true);
   const [loading, setLoading] = useState(false);
+
+  async function ensureBackendAvailable() {
+    setCheckingConnection(true);
+    setError("");
+    let healthy = false;
+
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      healthy = await checkApiHealth();
+      if (healthy || attempt === 14) {
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    if (!healthy) {
+      setError(
+        "The POS server is not available on http://localhost:3000. Start the Big Bites backend service and retry.",
+      );
+      setCheckingConnection(false);
+      return false;
+    }
+
+    setError("");
+    setCheckingConnection(false);
+    return true;
+  }
+
+  useEffect(() => {
+    void ensureBackendAvailable();
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
     setError("");
+
+    const available = await ensureBackendAvailable();
+    if (!available) {
+      setLoading(false);
+      return;
+    }
 
     try {
       const data = await request("/api/auth/login", {
@@ -169,7 +356,13 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
       });
       onLogin(data.token, data.user);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      const message =
+        err instanceof Error && err.message === "Failed to fetch"
+          ? "The POS server is unavailable on http://localhost:3000. Please start the backend and retry."
+          : err instanceof Error
+            ? err.message
+            : "Login failed";
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -179,13 +372,12 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
     <main className="login-page">
       <form className="login-card" onSubmit={submit}>
         <div className="brand-block">
-          <div className="brand-circle">BB</div>
+          <img className="brand-logo" src="/big-bites-logo.png" alt="Big Bites logo" />
           <div>
             <div className="eyebrow">{RESTAURANT_NAME}</div>
             <h1>Welcome back</h1>
           </div>
         </div>
-
         <label>
           Username
           <input
@@ -209,7 +401,20 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
 
         {error && <div className="error-banner">{error}</div>}
 
-        <button className="primary-btn full" disabled={loading} type="submit">
+        {!error && checkingConnection && (
+          <div className="info-banner">Checking POS server connection...</div>
+        )}
+
+        <button
+          className="secondary-btn full"
+          type="button"
+          disabled={loading || checkingConnection}
+          onClick={() => void ensureBackendAvailable()}
+        >
+          Retry connection
+        </button>
+
+        <button className="primary-btn full" disabled={loading || checkingConnection} type="submit">
           {loading ? "Logging in..." : "Login"}
         </button>
       </form>
@@ -229,11 +434,15 @@ function ReceiptPreview({
   onProceedToPayment?: () => void;
 }) {
   const paid = order.payment?.status === "PAID" || order.status === "COMPLETED";
-  const subtotal = order.items.reduce(
-    (sum, item) => sum + Number(item.subtotal),
+  const items = Array.isArray(order.items) ? order.items : [];
+  const subtotal = sumMinorUnits(items.map((item) => item.subtotal));
+  const amounts = orderAmounts(order);
+  const totalItems = items.reduce(
+    (sum, item) => sum + Number(item.quantity || 0),
     0,
   );
-  const amounts = orderAmounts(order);
+  const settlementType = order.payment?.method ?? (paid ? "PAID" : "UNPAID");
+  const gstCharged = order.gstEnabled !== false;
   const receiptDate = new Date(order.payment?.paidAt ?? order.createdAt);
   const dateTime = Number.isNaN(receiptDate.getTime())
     ? "Date unavailable"
@@ -271,13 +480,25 @@ function ReceiptPreview({
           aria-label={`Receipt for order ${order.id}`}
         >
           <div className="receipt-header">
-            <h2>{RESTAURANT_NAME}</h2>
-            {order.restaurantAddress && (
-              <p className="receipt-address">{order.restaurantAddress}</p>
-            )}
+            <img
+              className="receipt-logo"
+              src="/big-bites-logo.png"
+              alt="Big Bites logo"
+            />
+            <h2>{RECEIPT_RESTAURANT_NAME}</h2>
           </div>
 
           <hr className="receipt-divider" />
+
+          <div className="receipt-tax-invoice">
+            {gstCharged ? "TAX INVOICE" : "GST: OFF"}
+          </div>
+          {order.fssaiEnabled && order.fssaiNumber?.trim() && (
+            <div className="receipt-tax-id">FSSAI: {order.fssaiNumber}</div>
+          )}
+          {order.gstinEnabled && order.gstinNumber?.trim() && (
+            <div className="receipt-tax-id">GSTIN: {order.gstinNumber}</div>
+          )}
 
           <div className="receipt-details">
             <div>
@@ -290,7 +511,7 @@ function ReceiptPreview({
             </div>
             <div>
               <span>Table:</span>
-              <strong>{order.table.isParcel ? "Parcel" : order.table.number}</strong>
+              <strong>{order.table?.isParcel ? "Parcel" : order.table?.number ?? "—"}</strong>
             </div>
             <div>
               <span>Cashier:</span>
@@ -308,12 +529,15 @@ function ReceiptPreview({
               <span>Total</span>
             </div>
 
-            {order.items.map((item) => (
-              <div className="receipt-row" key={item.id}>
-                <span className="receipt-item-name">{item.product.name}</span>
-                <span>{item.quantity}</span>
-                <span>{money(item.unitPrice)}</span>
-                <span>{money(item.subtotal)}</span>
+            {items.map((item) => (
+              <div key={item.id}>
+                <div className="receipt-row">
+                  <span className="receipt-item-name">{item.product.name}</span>
+                  <span>{item.quantity}</span>
+                  <span>{money(item.unitPrice)}</span>
+                  <span>{money(item.subtotal)}</span>
+                </div>
+                <div className="receipt-item-divider" aria-hidden="true" />
               </div>
             ))}
           </div>
@@ -323,44 +547,79 @@ function ReceiptPreview({
           <div className="receipt-summary">
             <div className="receipt-summary-row">
               <span>Subtotal</span>
-              <strong>{money(subtotal)}</strong>
+              <strong>{money(minorUnitsToNumber(subtotal))}</strong>
             </div>
-            <div className="receipt-summary-row">
-              <span>CGST ({percent(amounts.cgstRate)})</span>
-              <strong>{money(amounts.cgstAmount)}</strong>
-            </div>
-            <div className="receipt-summary-row">
-              <span>SGST ({percent(amounts.sgstRate)})</span>
-              <strong>{money(amounts.sgstAmount)}</strong>
-            </div>
-            <div className="receipt-summary-row">
-              <span>Total GST ({percent(amounts.gstRate)})</span>
-              <strong>{money(amounts.gstAmount)}</strong>
-            </div>
-            <div className="receipt-summary-row">
-              <span>Discount</span>
-              <strong>{money(0)}</strong>
-            </div>
+            {amounts.discountAmount > 0 && (
+              <>
+                <div className="receipt-summary-row">
+                  <span>
+                    {order.discountType === "PERCENTAGE"
+                      ? `Discount (${percent(order.discountValue ?? 0)})`
+                      : "Discount"}
+                  </span>
+                  <strong>-{money(amounts.discountAmount)}</strong>
+                </div>
+                <div className="receipt-summary-row">
+                  <span>Taxable Amount</span>
+                  <strong>{money(amounts.taxableSubtotal)}</strong>
+                </div>
+              </>
+            )}
+            {gstCharged && (
+              <>
+                <div className="receipt-summary-row">
+                  <span>CGST ({percent(amounts.cgstRate)})</span>
+                  <strong>{money(amounts.cgstAmount)}</strong>
+                </div>
+                <div className="receipt-summary-row">
+                  <span>SGST ({percent(amounts.sgstRate)})</span>
+                  <strong>{money(amounts.sgstAmount)}</strong>
+                </div>
+              </>
+            )}
           </div>
 
           <hr className="receipt-divider" />
 
           <div className="receipt-total">
-            <span>GRAND TOTAL</span>
+            <span>TOTAL</span>
             <strong>{money(amounts.grandTotal)}</strong>
           </div>
 
           <hr className="receipt-divider" />
 
-          <p className="receipt-payment">
-            Payment: {paid ? order.payment?.method ?? "PAID" : "UNPAID"}
-          </p>
+          <div className="receipt-summary receipt-settlement">
+            <div className="receipt-summary-row">
+              <span>Total Items</span>
+              <strong>{totalItems}</strong>
+            </div>
+            <div className="receipt-summary-row">
+              <span>Payment method</span>
+              <strong>{settlementType}</strong>
+            </div>
+            {paid && order.payment?.amountReceived != null && (
+              <div className="receipt-summary-row">
+                <span>Amount received</span>
+                <strong>{money(order.payment.amountReceived)}</strong>
+              </div>
+            )}
+            {paid && order.payment?.change != null && (
+              <div className="receipt-summary-row">
+                <span>Change</span>
+                <strong>{money(order.payment.change)}</strong>
+              </div>
+            )}
+          </div>
 
           <hr className="receipt-divider" />
 
           <div className="receipt-footer">
-            <strong>Thank You</strong>
-            <span>Visit Again</span>
+            <strong>THANK YOU! VISIT US AGAIN!!</strong>
+            {order.restaurantAddress?.trim() && (
+              <p className="receipt-address">{order.restaurantAddress.trim()}</p>
+            )}
+            <div className="receipt-branding">Developed By ZEROPOINT LABS</div>
+            <div className="receipt-website">www.zeropointlabs.in</div>
           </div>
         </article>
       </div>
@@ -381,9 +640,13 @@ function BillingScreen({
   const [selected, setSelected] = useState<Order | null>(null);
   const [method, setMethod] = useState("CASH");
   const [amountReceived, setAmountReceived] = useState("");
+  const [discountType, setDiscountType] = useState<DiscountKind>("AMOUNT");
+  const [discountValue, setDiscountValue] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [showPayment, setShowPayment] = useState(false);
+  const [paying, setPaying] = useState(false);
+  const payingRef = useRef(false);
   const [preview, setPreview] = useState<Order | null>(null);
   const [orderQuery, setOrderQuery] = useState("");
   const [orderFilter, setOrderFilter] = useState<"active" | "completed" | "all">("active");
@@ -401,7 +664,76 @@ function BillingScreen({
       );
     }
 
-    return { ...order, restaurantAddress: billDetails.restaurantAddress };
+    return {
+      ...order,
+      restaurantAddress: billDetails.restaurantAddress,
+      fssaiEnabled: billDetails.fssaiEnabled === true,
+      fssaiNumber:
+        typeof billDetails.fssaiNumber === "string"
+          ? billDetails.fssaiNumber
+          : "",
+      gstinEnabled: billDetails.gstinEnabled === true,
+      gstinNumber:
+        typeof billDetails.gstinNumber === "string"
+          ? billDetails.gstinNumber
+          : "",
+      discountType:
+        billDetails.discountType === "AMOUNT" ||
+        billDetails.discountType === "PERCENTAGE"
+          ? billDetails.discountType
+          : null,
+      discountValue:
+        typeof billDetails.discountValue === "string" ||
+        typeof billDetails.discountValue === "number"
+          ? billDetails.discountValue
+          : null,
+      discountAmount:
+        typeof billDetails.discountAmount === "string" ||
+        typeof billDetails.discountAmount === "number"
+          ? billDetails.discountAmount
+          : 0,
+      subtotal: billDetails.subtotal ?? order.subtotal ?? order.total,
+      taxableSubtotal: billDetails.taxableSubtotal,
+      gstRate: billDetails.gstRate ?? order.gstRate,
+      gstEnabled: billDetails.gstEnabled !== false,
+      cgstRate: billDetails.cgstRate,
+      sgstRate: billDetails.sgstRate,
+      cgstAmount: billDetails.cgstAmount,
+      sgstAmount: billDetails.sgstAmount,
+      gstAmount: billDetails.gstAmount,
+      grandTotal: billDetails.grandTotal,
+    };
+  }
+
+  async function saveDiscount(order: Order) {
+    const trimmedValue = discountValue.trim();
+    const value = trimmedValue || null;
+    const type = value === null ? null : discountType;
+    const result = await request(
+      `/api/billing/orders/${order.id}/discount`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ discountType: type, discountValue: value }),
+      },
+      token,
+    );
+    return {
+      ...order,
+      discountType: result.discountType as DiscountKind | null,
+      discountValue:
+        result.discountValue == null ? null : Number(result.discountValue),
+      discountAmount: Number(result.discountAmount ?? 0),
+      subtotal: result.subtotal ?? order.subtotal ?? order.total,
+      taxableSubtotal: result.taxableSubtotal,
+      gstRate: result.gstRate ?? order.gstRate,
+      gstEnabled: result.gstEnabled !== false,
+      cgstRate: result.cgstRate,
+      sgstRate: result.sgstRate,
+      cgstAmount: result.cgstAmount,
+      sgstAmount: result.sgstAmount,
+      gstAmount: result.gstAmount,
+      grandTotal: result.grandTotal,
+    };
   }
 
   async function load() {
@@ -417,7 +749,7 @@ function BillingScreen({
         return (
           active.find((order: Order) => order.id === current.id) ??
           done.find((order: Order) => order.id === current.id) ??
-          current
+          null
         );
       });
       setError("");
@@ -449,48 +781,90 @@ function BillingScreen({
     );
   }, [completed, orderFilter, orderQuery, orders]);
 
+  const selectedTaxAmounts = selected ? orderAmounts(selected) : null;
+  const enteredDiscount = selectedTaxAmounts
+    ? calculateEnteredDiscount(
+        selectedTaxAmounts.subtotal,
+        selectedTaxAmounts.gstRate,
+        discountType,
+        discountValue,
+      )
+    : null;
+  const selectedIsBillable = selected?.status === "READY_FOR_BILLING";
+  const displayedDiscountAmount = selectedIsBillable
+    ? enteredDiscount?.discountAmount ?? 0
+    : selected
+      ? orderAmounts(selected).discountAmount
+      : 0;
+  const displayedFinalTotal = selectedIsBillable
+    ? enteredDiscount?.grandTotal ?? orderAmounts(selected!).grandTotal
+    : selected
+      ? orderAmounts(selected).grandTotal
+      : 0;
+  const paymentDue = displayedFinalTotal;
+  const receivedMinor = amountReceived.trim()
+    ? parseMinorUnits(amountReceived)
+    : null;
+  const paymentDueMinor = parseMinorUnits(paymentDue);
+  const cashPaymentValid =
+    (!selectedIsBillable || enteredDiscount !== null) &&
+    (method !== "CASH" ||
+      (receivedMinor !== null &&
+      paymentDueMinor !== null &&
+      receivedMinor >= paymentDueMinor));
+
   async function pay() {
-    if (!selected) return;
+    if (!selected || payingRef.current || !cashPaymentValid) return;
 
-    let billWithAddress: Order;
+    payingRef.current = true;
+    setPaying(true);
+    setError("");
     try {
-      billWithAddress = await loadBillAddress(selected);
+      const discountedOrder = await saveDiscount(selected);
+      const billWithAddress = await loadBillAddress(discountedOrder);
       setSelected(billWithAddress);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load bill details");
-      return;
-    }
 
-    const grandTotal = orderAmounts(selected).grandTotal;
-    const received = method === "CASH" ? Number(amountReceived) : 0;
-    if (method === "CASH" && (!Number.isFinite(received) || received < grandTotal)) {
-      setError(`Amount received must be at least ${money(grandTotal)}.`);
-      return;
-    }
-
-    try {
       const result = await request(
         `/api/billing/orders/${selected.id}/pay`,
         {
           method: "POST",
-          body: JSON.stringify({ method, amountReceived: received }),
+          body: JSON.stringify({
+            method,
+            ...(method === "CASH"
+              ? { amountReceived: amountReceived.trim() }
+              : {}),
+          }),
         },
         token,
       );
 
       const paidOrder = {
         ...billWithAddress,
+        gstRate: result.gstRate,
+        gstEnabled: result.gstEnabled,
         status: "COMPLETED",
-        payment: result.payment,
+        payment: {
+          ...result.payment,
+          amountReceived: result.amountReceived,
+          change: result.change,
+        },
       };
       setSuccess(`Payment successful. Order #${selected.id} is completed.`);
       setSelected(null);
       setShowPayment(false);
       setAmountReceived("");
       await load();
+      if (result.orderReportError) {
+        setError(
+          `Payment completed, but the Excel order report could not be updated: ${result.orderReportError}`,
+        );
+      }
       setPreview(paidOrder);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Payment failed");
+      setError(err instanceof Error ? err.message : "Unable to prepare or process payment");
+    } finally {
+      payingRef.current = false;
+      setPaying(false);
     }
   }
 
@@ -557,6 +931,12 @@ function BillingScreen({
                   className={selected?.id === order.id ? "order-card selected" : "order-card"}
                   onClick={async () => {
                     setSelected(order);
+                    setDiscountType(order.discountType ?? "AMOUNT");
+                    setDiscountValue(
+                      order.discountValue == null
+                        ? ""
+                        : String(order.discountValue),
+                    );
                     setShowPayment(false);
                     setError("");
                     try {
@@ -588,7 +968,7 @@ function BillingScreen({
                   <div className="order-card-grid">
                     <div>
                       <span>Items</span>
-                      <strong>{order.items.reduce((sum, item) => sum + item.quantity, 0)}</strong>
+                      <strong>{(Array.isArray(order.items) ? order.items : []).reduce((sum, item) => sum + item.quantity, 0)}</strong>
                     </div>
                     <div>
                       <span>Time</span>
@@ -633,7 +1013,7 @@ function BillingScreen({
               )}
 
               <div className="bill-items">
-                {selected.items.map((item) => (
+                {(Array.isArray(selected.items) ? selected.items : []).map((item) => (
                   <div className="bill-item" key={item.id}>
                     <div>
                       <strong>{item.product.name}</strong>
@@ -651,30 +1031,86 @@ function BillingScreen({
                   <span>Subtotal</span>
                   <strong>{money(orderAmounts(selected).subtotal)}</strong>
                 </div>
-                <div className="bill-summary-row">
-                  <span>CGST ({percent(orderAmounts(selected).cgstRate)})</span>
-                  <strong>{money(orderAmounts(selected).cgstAmount)}</strong>
-                </div>
-                <div className="bill-summary-row">
-                  <span>SGST ({percent(orderAmounts(selected).sgstRate)})</span>
-                  <strong>{money(orderAmounts(selected).sgstAmount)}</strong>
-                </div>
-                <div className="bill-summary-row">
-                  <span>Total GST ({percent(orderAmounts(selected).gstRate)})</span>
-                  <strong>{money(orderAmounts(selected).gstAmount)}</strong>
-                </div>
+                {selected.gstEnabled !== false ? (
+                  <>
+                    <div className="bill-summary-row">
+                      <span>CGST ({percent(orderAmounts(selected).cgstRate)})</span>
+                      <strong>{money(orderAmounts(selected).cgstAmount)}</strong>
+                    </div>
+                    <div className="bill-summary-row">
+                      <span>SGST ({percent(orderAmounts(selected).sgstRate)})</span>
+                      <strong>{money(orderAmounts(selected).sgstAmount)}</strong>
+                    </div>
+                  </>
+                ) : (
+                  <div className="bill-summary-row">
+                    <span>GST</span>
+                    <strong>OFF</strong>
+                  </div>
+                )}
+                {displayedDiscountAmount > 0 && (
+                  <div className="bill-summary-row">
+                    <span>
+                      {selectedIsBillable
+                        ? discountType === "PERCENTAGE"
+                          ? `Discount (${percent(discountValue)})`
+                          : "Discount"
+                        : selected.discountType === "PERCENTAGE"
+                          ? `Discount (${percent(selected.discountValue ?? 0)})`
+                          : "Discount"}
+                    </span>
+                    <strong>-{money(displayedDiscountAmount)}</strong>
+                  </div>
+                )}
                 <div className="bill-total-row">
-                  <span>Grand total</span>
-                  <strong>{money(orderAmounts(selected).grandTotal)}</strong>
+                  <span>Total</span>
+                  <strong>{money(displayedFinalTotal)}</strong>
                 </div>
               </div>
 
-              <div className="action-row">
+              {selected.status === "READY_FOR_BILLING" && (
+                <div className="discount-controls">
+                  <label>
+                    Discount type
+                    <select
+                      value={discountType}
+                      onChange={(event) =>
+                        setDiscountType(event.target.value as DiscountKind)
+                      }
+                    >
+                      <option value="AMOUNT">Amount (₹)</option>
+                      <option value="PERCENTAGE">Percentage (%)</option>
+                    </select>
+                  </label>
+                  <label>
+                    Discount
+                    <input
+                      type="number"
+                      min="0"
+                      max={discountType === "PERCENTAGE" ? 100 : undefined}
+                      step="0.01"
+                      value={discountValue}
+                      onChange={(event) => setDiscountValue(event.target.value)}
+                      placeholder="No discount"
+                    />
+                    {discountValue.trim() && !enteredDiscount && (
+                      <span className="field-error">
+                        Enter a valid discount with at most 2 decimal places.
+                      </span>
+                    )}
+                  </label>
+                </div>
+              )}
+
+              {selectedIsBillable && <div className="action-row">
                 <button
                   className="secondary-btn"
                   onClick={async () => {
                     try {
-                      const orderWithAddress = await loadBillAddress(selected);
+                      const discountedOrder = await saveDiscount(selected);
+                      const orderWithAddress = await loadBillAddress(
+                        discountedOrder,
+                      );
                       setSelected(orderWithAddress);
                       setPreview(orderWithAddress);
                       setError("");
@@ -689,9 +1125,9 @@ function BillingScreen({
                 >
                   Generate Bill
                 </button>
-              </div>
+              </div>}
 
-              {!showPayment ? (
+              {selectedIsBillable && (!showPayment ? (
                 <button className="primary-btn full" onClick={() => setShowPayment(true)}>
                   Proceed to payment
                 </button>
@@ -699,7 +1135,7 @@ function BillingScreen({
                 <div className="payment-box">
                   <h4>Payment details</h4>
                   <div className="due-amount">
-                    Amount due: {money(orderAmounts(selected).grandTotal)}
+                    Amount due: {money(paymentDue)}
                   </div>
 
                   <div className="payment-methods">
@@ -719,24 +1155,38 @@ function BillingScreen({
                       Amount received
                       <input
                         type="number"
-                        min={orderAmounts(selected).grandTotal}
+                        min={
+                          enteredDiscount?.grandTotal ??
+                          orderAmounts(selected).grandTotal
+                        }
                         step="0.01"
                         value={amountReceived}
                         onChange={(event) => setAmountReceived(event.target.value)}
                       />
-                      {amountReceived && Number(amountReceived) >= orderAmounts(selected).grandTotal && (
+                      {amountReceived && receivedMinor !== null && paymentDueMinor !== null && (
                         <strong>
-                          Change: {money(Number(amountReceived) - orderAmounts(selected).grandTotal)}
+                          {receivedMinor >= paymentDueMinor
+                            ? `Change: ${money(minorUnitsToNumber(receivedMinor - paymentDueMinor))}`
+                            : `Balance: ${money(minorUnitsToNumber(paymentDueMinor - receivedMinor))}`}
                         </strong>
+                      )}
+                      {amountReceived && receivedMinor === null && (
+                        <span className="field-error">
+                          Enter an amount with at most 2 decimal places.
+                        </span>
                       )}
                     </label>
                   )}
 
-                  <button className="primary-btn full" onClick={() => void pay()}>
-                    PAYMENT RECEIVED
+                  <button
+                    className="primary-btn full"
+                    onClick={() => void pay()}
+                    disabled={paying || !cashPaymentValid}
+                  >
+                    {paying ? "Processing..." : "PAYMENT RECEIVED"}
                   </button>
                 </div>
-              )}
+              ))}
             </>
           )}
         </section>
@@ -796,8 +1246,8 @@ function BillingScreen({
   );
 }
 
-function AdminScreen({ token }: { token: string }) {
-  const [activeTab, setActiveTab] = useState<"overview" | "products" | "tables" | "orders" | "payments" | "settings" | "waiters" | "staff">("overview");
+function AdminScreen({ token, role }: { token: string; role: string }) {
+  const [activeTab, setActiveTab] = useState<"overview" | "products" | "tables" | "orders" | "payments" | "settings" | "reports" | "waiters" | "staff">("overview");
   const [dashboard, setDashboard] = useState<Dashboard>({
     openOrders: 0,
     completedOrders: 0,
@@ -816,15 +1266,22 @@ function AdminScreen({ token }: { token: string }) {
   const [staffUsers, setStaffUsers] = useState<User[]>([]);
   const [waiters, setWaiters] = useState<User[]>([]);
   const [waiterError, setWaiterError] = useState("");
+  const [orderMessage, setOrderMessage] = useState("");
   const [waitersLoading, setWaitersLoading] = useState(false);
   const [error, setError] = useState("");
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [tableModalOpen, setTableModalOpen] = useState(false);
   const [waiterModalOpen, setWaiterModalOpen] = useState(false);
+  const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
   const [tableNumber, setTableNumber] = useState("");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editingWaiter, setEditingWaiter] = useState<User | null>(null);
-  const [waiterForm, setWaiterForm] = useState({ name: "", username: "", password: "" });
+  const [waiterForm, setWaiterForm] = useState({
+    name: "",
+    username: "",
+    password: "",
+    role: "" as UserRole | "",
+  });
   const [productForm, setProductForm] = useState({
     name: "",
     categoryId: "",
@@ -834,11 +1291,22 @@ function AdminScreen({ token }: { token: string }) {
   });
   const [productQuery, setProductQuery] = useState("");
   const [gstRate, setGstRate] = useState("5");
+  const [gstEnabled, setGstEnabled] = useState(true);
   const [restaurantAddress, setRestaurantAddress] = useState("");
+  const [fssaiEnabled, setFssaiEnabled] = useState(false);
+  const [fssaiNumber, setFssaiNumber] = useState("");
+  const [gstinEnabled, setGstinEnabled] = useState(false);
+  const [gstinNumber, setGstinNumber] = useState("");
   const [savingGst, setSavingGst] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState("");
   const [settingsError, setSettingsError] = useState("");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [reportSummary, setReportSummary] = useState<OrderReportsSummary | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportLocationSaving, setReportLocationSaving] = useState(false);
+  const [reportExporting, setReportExporting] = useState(false);
+  const [reportMessage, setReportMessage] = useState("");
+  const [reportError, setReportError] = useState("");
 
   const load = async () => {
     try {
@@ -873,7 +1341,12 @@ function AdminScreen({ token }: { token: string }) {
         token,
       );
       setGstRate(String(settings.gstRate));
+      setGstEnabled(settings.gstEnabled !== false);
       setRestaurantAddress(settings.restaurantAddress ?? "");
+      setFssaiEnabled(settings.fssaiEnabled === true);
+      setFssaiNumber(settings.fssaiNumber ?? "");
+      setGstinEnabled(settings.gstinEnabled === true);
+      setGstinNumber(settings.gstinNumber ?? "");
       setSettingsLoaded(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unable to load GST settings";
@@ -885,8 +1358,110 @@ function AdminScreen({ token }: { token: string }) {
     }
   };
 
+  const loadOrderReports = async () => {
+    setReportLoading(true);
+    setReportError("");
+    try {
+      const summary = await request("/api/admin/order-reports", {}, token);
+      setReportSummary(summary);
+    } catch (err) {
+      setReportError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load monthly order reports",
+      );
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const saveOrderReportsPath = async (folderPath: string) => {
+    setReportLocationSaving(true);
+    setReportMessage("");
+    setReportError("");
+    let locationSaved = false;
+    try {
+      await request(
+        "/api/admin/settings",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ orderReportsPath: folderPath }),
+        },
+        token,
+      );
+      locationSaved = true;
+      await request(
+        "/api/admin/order-reports/export",
+        { method: "POST" },
+        token,
+      );
+      setReportMessage("Excel save location saved and monthly reports updated.");
+      await loadOrderReports();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unable to update order reports";
+      setReportError(
+        locationSaved
+          ? `The folder was saved, but monthly reports could not be updated: ${message}`
+          : `Unable to save the Excel folder: ${message}`,
+      );
+      await loadOrderReports();
+    } finally {
+      setReportLocationSaving(false);
+    }
+  };
+
+  const chooseOrderReportsPath = async () => {
+    setReportError("");
+    try {
+      const selectedPath = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose Excel order-history folder",
+      });
+      if (typeof selectedPath === "string" && selectedPath.trim()) {
+        await saveOrderReportsPath(selectedPath);
+      }
+    } catch (err) {
+      setReportError(
+        err instanceof Error
+          ? `Unable to open the folder picker: ${err.message}`
+          : "Unable to open the folder picker.",
+      );
+    }
+  };
+
+  const exportOrderReports = async () => {
+    setReportExporting(true);
+    setReportMessage("");
+    setReportError("");
+    try {
+      const result = await request(
+        "/api/admin/order-reports/export",
+        { method: "POST" },
+        token,
+      );
+      setReportMessage(
+        result.reports.length
+          ? `${result.reports.length} monthly workbook(s) updated.`
+          : "No completed and paid orders are available to export yet.",
+      );
+      await loadOrderReports();
+    } catch (err) {
+      setReportError(
+        err instanceof Error
+          ? err.message
+          : "Unable to update monthly Excel reports",
+      );
+      await loadOrderReports();
+    } finally {
+      setReportExporting(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === "settings") void loadGstSettings();
+    if (activeTab === "reports") void loadOrderReports();
   }, [activeTab, token]);
 
   const saveGstRate = async (event: FormEvent) => {
@@ -902,13 +1477,23 @@ function AdminScreen({ token }: { token: string }) {
           method: "PATCH",
           body: JSON.stringify({
             gstRate: Number(gstRate),
+            gstEnabled,
             restaurantAddress,
+            fssaiEnabled,
+            fssaiNumber,
+            gstinEnabled,
+            gstinNumber,
           }),
         },
         token,
       );
       setGstRate(String(settings.gstRate));
+      setGstEnabled(settings.gstEnabled !== false);
       setRestaurantAddress(settings.restaurantAddress ?? "");
+      setFssaiEnabled(settings.fssaiEnabled === true);
+      setFssaiNumber(settings.fssaiNumber ?? "");
+      setGstinEnabled(settings.gstinEnabled === true);
+      setGstinNumber(settings.gstinNumber ?? "");
       setSettingsLoaded(true);
       setSettingsMessage("Restaurant billing settings saved.");
     } catch (err) {
@@ -934,6 +1519,33 @@ function AdminScreen({ token }: { token: string }) {
       setWaiterError(err instanceof Error ? err.message : "Unable to load users");
     } finally {
       setWaitersLoading(false);
+    }
+  };
+
+  const deleteUser = async (staffUser: User) => {
+    if (
+      !window.confirm(
+        `Delete ${staffUser.role === "WAITER" ? "waiter" : "user"} "${staffUser.name}"? Users with order history cannot be deleted.`,
+      )
+    ) {
+      return;
+    }
+
+    setWaiterError("");
+    setDeletingUserId(staffUser.id);
+    try {
+      await request(
+        `/api/admin/users/${staffUser.id}`,
+        { method: "DELETE" },
+        token,
+      );
+      await loadUsers();
+    } catch (err) {
+      setWaiterError(
+        err instanceof Error ? err.message : "Unable to delete user",
+      );
+    } finally {
+      setDeletingUserId(null);
     }
   };
 
@@ -1024,6 +1636,38 @@ function AdminScreen({ token }: { token: string }) {
     }
   };
 
+  const deleteOrder = async (order: Order) => {
+    const paidOrCompleted =
+      order.status === "COMPLETED" ||
+      order.payment?.status === "PAID" ||
+      order.payment?.status === "REFUNDED";
+    const confirmation = paidOrCompleted
+      ? `Delete order #${order.id} and its payment record? This cannot be undone and sold stock will not be restored.`
+      : `Delete unpaid order #${order.id}? Its items and pending payment record will be deleted, and its stock returned.`;
+
+    if (
+      role !== "ADMIN" ||
+      !window.confirm(confirmation)
+    ) {
+      return;
+    }
+
+    setError("");
+    setOrderMessage("");
+    try {
+      await request(
+        `/api/admin/orders/${order.id}`,
+        { method: "DELETE" },
+        token,
+      );
+      setOrders((current) => current.filter((item) => item.id !== order.id));
+      setOrderMessage(`Order #${order.id} was deleted.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to delete order");
+    }
+  };
+
   const saveTable = async (event: FormEvent) => {
     event.preventDefault();
     const number = Number(tableNumber);
@@ -1052,14 +1696,21 @@ function AdminScreen({ token }: { token: string }) {
 
   const openCreateWaiter = () => {
     setEditingWaiter(null);
-    setWaiterForm({ name: "", username: "", password: "" });
+    setWaiterForm({ name: "", username: "", password: "", role: "WAITER" });
+    setWaiterError("");
+    setWaiterModalOpen(true);
+  };
+
+  const openCreateStaffUser = () => {
+    setEditingWaiter(null);
+    setWaiterForm({ name: "", username: "", password: "", role: "" });
     setWaiterError("");
     setWaiterModalOpen(true);
   };
 
   const openEditUser = (user: User) => {
     setEditingWaiter(user);
-    setWaiterForm({ name: user.name, username: user.username, password: "" });
+    setWaiterForm({ name: user.name, username: user.username, password: "", role: user.role });
     setWaiterError("");
     setWaiterModalOpen(true);
   };
@@ -1067,7 +1718,7 @@ function AdminScreen({ token }: { token: string }) {
   const closeWaiterModal = () => {
     setWaiterModalOpen(false);
     setEditingWaiter(null);
-    setWaiterForm({ name: "", username: "", password: "" });
+    setWaiterForm({ name: "", username: "", password: "", role: "" });
     setWaiterError("");
   };
 
@@ -1075,18 +1726,17 @@ function AdminScreen({ token }: { token: string }) {
     event.preventDefault();
     setWaiterError("");
 
-    const payload = editingWaiter
-      ? {
-          name: waiterForm.name.trim(),
-          username: waiterForm.username.trim(),
-          ...(waiterForm.password ? { password: waiterForm.password } : {}),
-        }
-      : {
-          name: waiterForm.name.trim(),
-          username: waiterForm.username.trim(),
-          password: waiterForm.password,
-          role: "WAITER",
-        };
+    if (activeTab !== "waiters" && !waiterForm.role) {
+      setWaiterError("Select a role.");
+      return;
+    }
+
+    const payload = {
+      name: waiterForm.name.trim(),
+      username: waiterForm.username.trim(),
+      role: activeTab === "waiters" ? "WAITER" : waiterForm.role,
+      ...(!editingWaiter || waiterForm.password ? { password: waiterForm.password } : {}),
+    };
 
     try {
       await request(
@@ -1122,7 +1772,7 @@ function AdminScreen({ token }: { token: string }) {
       <div className="admin-shell">
         <aside className="admin-sidebar">
           <div className="sidebar-brand">
-            <div className="brand-circle small">BB</div>
+            <img className="brand-logo small" src="/big-bites-logo.png" alt="Big Bites logo" />
             <strong>{RESTAURANT_NAME}</strong>
           </div>
 
@@ -1144,6 +1794,9 @@ function AdminScreen({ token }: { token: string }) {
             </button>
             <button className={activeTab === "settings" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("settings")}>
               <span className="nav-icon">⚙</span> GST Settings
+            </button>
+            <button className={activeTab === "reports" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("reports")}>
+              <span className="nav-icon">▤</span> Order Reports
             </button>
             <button className={activeTab === "waiters" ? "sidebar-link active" : "sidebar-link"} onClick={() => setActiveTab("waiters")}>
               <span className="nav-icon">♙</span> Waiters
@@ -1328,14 +1981,26 @@ function AdminScreen({ token }: { token: string }) {
                 </div>
               </div>
 
+              {error && <div className="error-banner">{error}</div>}
+              {orderMessage && (
+                <div className="success-banner">{orderMessage}</div>
+              )}
               <div className="data-list">
-                {orders.slice(0, 20).map((order) => (
+                {orders.map((order) => (
                   <div className="data-row order-data-row" key={order.id}>
                     <strong className="data-row-primary">Order #{order.id} · {tableLabel(order.table)}</strong>
                     <span className="data-row-secondary order-row-details">
                       <span>{order.status}</span>
                       <span>{money(orderAmounts(order).grandTotal)}</span>
                       <time>{new Date(order.createdAt).toLocaleString()}</time>
+                      {role === "ADMIN" && (
+                        <button
+                          className="danger-btn small"
+                          onClick={() => void deleteOrder(order)}
+                        >
+                          Delete
+                        </button>
+                      )}
                     </span>
                   </div>
                 ))}
@@ -1384,8 +2049,22 @@ function AdminScreen({ token }: { token: string }) {
                 <div className="error-banner">{settingsError}</div>
               )}
               <form className="gst-settings-form" onSubmit={saveGstRate}>
+                <label className="setting-toggle">
+                  <span>GST: {gstEnabled ? "ON" : "OFF"}</span>
+                  <input
+                    type="checkbox"
+                    checked={gstEnabled}
+                    onChange={(event) => {
+                      setGstEnabled(event.target.checked);
+                      setSettingsMessage("");
+                      setSettingsError("");
+                    }}
+                    disabled={!settingsLoaded || savingGst}
+                    aria-label="Enable GST charges"
+                  />
+                </label>
                 <label>
-                  GST
+                  GST rate
                   <div className="gst-input-row">
                     <input
                       type="number"
@@ -1404,10 +2083,16 @@ function AdminScreen({ token }: { token: string }) {
                     <span>%</span>
                   </div>
                 </label>
-                <div className="gst-split-preview">
-                  <span>CGST ({percent(Number(gstRate) / 2)})</span>
-                  <span>SGST ({percent(Number(gstRate) / 2)})</span>
-                </div>
+                {gstEnabled ? (
+                  <div className="gst-split-preview">
+                    <span>CGST ({percent(Number(gstRate) / 2)})</span>
+                    <span>SGST ({percent(Number(gstRate) / 2)})</span>
+                  </div>
+                ) : (
+                  <div className="gst-split-preview">
+                    <span>GST is OFF. No CGST or SGST will be charged.</span>
+                  </div>
+                )}
                 <label className="address-field">
                   Restaurant address
                   <textarea
@@ -1422,8 +2107,68 @@ function AdminScreen({ token }: { token: string }) {
                     }}
                     disabled={!settingsLoaded || savingGst}
                   />
-                  <small>Use a new line for each address line. It will be printed below the restaurant name.</small>
+                  <small>Use a new line for each address line. It will be printed at the bottom of the receipt.</small>
                 </label>
+                <label className="setting-toggle">
+                  <span>Print FSSAI number</span>
+                  <input
+                    type="checkbox"
+                    checked={fssaiEnabled}
+                    onChange={(event) => {
+                      setFssaiEnabled(event.target.checked);
+                      setSettingsMessage("");
+                      setSettingsError("");
+                    }}
+                    disabled={!settingsLoaded || savingGst}
+                  />
+                </label>
+                {fssaiEnabled && (
+                  <label className="address-field">
+                    FSSAI number
+                    <input
+                      type="text"
+                      maxLength={100}
+                      value={fssaiNumber}
+                      onChange={(event) => {
+                        setFssaiNumber(event.target.value);
+                        setSettingsMessage("");
+                        setSettingsError("");
+                      }}
+                      required
+                      disabled={!settingsLoaded || savingGst}
+                    />
+                  </label>
+                )}
+                <label className="setting-toggle">
+                  <span>Print GSTIN</span>
+                  <input
+                    type="checkbox"
+                    checked={gstinEnabled}
+                    onChange={(event) => {
+                      setGstinEnabled(event.target.checked);
+                      setSettingsMessage("");
+                      setSettingsError("");
+                    }}
+                    disabled={!settingsLoaded || savingGst}
+                  />
+                </label>
+                {gstinEnabled && (
+                  <label className="address-field">
+                    GSTIN
+                    <input
+                      type="text"
+                      maxLength={100}
+                      value={gstinNumber}
+                      onChange={(event) => {
+                        setGstinNumber(event.target.value);
+                        setSettingsMessage("");
+                        setSettingsError("");
+                      }}
+                      required
+                      disabled={!settingsLoaded || savingGst}
+                    />
+                  </label>
+                )}
                 <button
                   className="secondary-btn"
                   disabled={settingsLoaded || savingGst}
@@ -1440,6 +2185,80 @@ function AdminScreen({ token }: { token: string }) {
                   {savingGst ? "Saving..." : "Save settings"}
                 </button>
               </form>
+            </section>
+          )}
+
+          {activeTab === "reports" && (
+            <section className="panel product-panel">
+              <div className="panel-heading">
+                <div>
+                  <div className="eyebrow">Completed and paid orders</div>
+                  <h3>Order History &amp; Monthly Excel Reports</h3>
+                </div>
+                <button
+                  className="secondary-btn"
+                  onClick={() => void loadOrderReports()}
+                  disabled={reportLoading || reportLocationSaving || reportExporting}
+                >
+                  Refresh
+                </button>
+              </div>
+              <p className="page-subtitle">
+                Monthly workbooks are rebuilt from paid orders in the database, so
+                refreshing or exporting again will not duplicate an order.
+              </p>
+              {reportError && <div className="error-banner">{reportError}</div>}
+              {reportMessage && <div className="success-banner">{reportMessage}</div>}
+              {reportSummary && !reportSummary.folderAvailable && (
+                <div className="error-banner">{reportSummary.folderError}</div>
+              )}
+              <div className="report-location">
+                <div>
+                  <span className="label">Excel save folder</span>
+                  <strong className="report-folder-path">
+                    {reportSummary?.folderPath || "Not configured"}
+                  </strong>
+                </div>
+                <button
+                  className="secondary-btn"
+                  onClick={() => void chooseOrderReportsPath()}
+                  disabled={reportLoading || reportLocationSaving || reportExporting}
+                >
+                  {reportLocationSaving
+                    ? "Saving folder..."
+                    : "Choose Excel Save Location"}
+                </button>
+                <button
+                  className="primary-btn"
+                  onClick={() => void exportOrderReports()}
+                  disabled={reportLoading || reportLocationSaving || reportExporting}
+                >
+                  {reportExporting ? "Updating..." : "Update Monthly Workbooks"}
+                </button>
+              </div>
+              {reportLoading ? (
+                <div className="empty-state">Loading monthly report information...</div>
+              ) : reportSummary?.months.length ? (
+                <div className="data-list">
+                  {reportSummary.months.map((month) => (
+                    <div className="data-row" key={month.month}>
+                      <strong className="data-row-primary">{month.fileName}</strong>
+                      <span className="data-row-secondary">
+                        {month.orderCount} paid order(s) · Monthly total income{" "}
+                        {money(month.totalIncome)} ·{" "}
+                        {month.fileExists
+                          ? `Updated ${month.exportedAt ? new Date(month.exportedAt).toLocaleString() : ""}`
+                          : "Workbook needs updating"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <div className="empty-icon">B</div>
+                  <h4>No completed and paid orders to report</h4>
+                </div>
+              )}
             </section>
           )}
 
@@ -1463,7 +2282,6 @@ function AdminScreen({ token }: { token: string }) {
                     <tr>
                       <th>Name</th>
                       <th>Username</th>
-                      <th>Role</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
@@ -1472,11 +2290,17 @@ function AdminScreen({ token }: { token: string }) {
                       <tr key={waiter.id}>
                         <td><strong>{waiter.name}</strong></td>
                         <td>{waiter.username}</td>
-                        <td><span className="pill neutral">{waiter.role}</span></td>
                         <td>
                           <div className="table-actions">
                             <button className="secondary-btn small" onClick={() => openEditUser(waiter)}>
                               Edit
+                            </button>
+                            <button
+                              className="danger-btn small"
+                              onClick={() => void deleteUser(waiter)}
+                              disabled={deletingUserId === waiter.id}
+                            >
+                              {deletingUserId === waiter.id ? "Deleting..." : "Delete"}
                             </button>
                           </div>
                         </td>
@@ -1502,8 +2326,11 @@ function AdminScreen({ token }: { token: string }) {
                 <div>
                   <div className="eyebrow">Team access</div>
                   <h3>User management</h3>
-                  <p className="page-subtitle">Manage login credentials for all staff roles.</p>
+                  <p className="page-subtitle">Manage Admin and Cashier accounts.</p>
                 </div>
+                <button className="primary-btn" onClick={openCreateStaffUser}>
+                  Add User
+                </button>
               </div>
 
               {waiterError && <div className="error-banner">{waiterError}</div>}
@@ -1519,7 +2346,7 @@ function AdminScreen({ token }: { token: string }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {staffUsers.map((staffUser) => (
+                    {staffUsers.filter((staffUser) => staffUser.role !== "WAITER").map((staffUser) => (
                       <tr key={staffUser.id}>
                         <td><strong>{staffUser.name}</strong></td>
                         <td>{staffUser.username}</td>
@@ -1529,6 +2356,13 @@ function AdminScreen({ token }: { token: string }) {
                             <button className="secondary-btn small" onClick={() => openEditUser(staffUser)}>
                               Edit
                             </button>
+                            <button
+                              className="danger-btn small"
+                              onClick={() => void deleteUser(staffUser)}
+                              disabled={deletingUserId === staffUser.id}
+                            >
+                              {deletingUserId === staffUser.id ? "Deleting..." : "Delete"}
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -1537,11 +2371,13 @@ function AdminScreen({ token }: { token: string }) {
                 </table>
               </div>
 
-              {!waitersLoading && staffUsers.length === 0 && !waiterError && (
+              {!waitersLoading &&
+                staffUsers.every((staffUser) => staffUser.role === "WAITER") &&
+                !waiterError && (
                 <div className="empty-state">
                   <h4>No staff users found</h4>
                 </div>
-              )}
+                )}
               {waitersLoading && <p className="page-subtitle">Loading users...</p>}
             </section>
           )}
@@ -1683,7 +2519,15 @@ function AdminScreen({ token }: { token: string }) {
             <div className="modal-header">
               <div>
                 <div className="eyebrow">Team access</div>
-                <h3>{editingWaiter ? "Edit staff user" : "Add waiter"}</h3>
+                <h3>
+                  {activeTab === "waiters"
+                    ? editingWaiter
+                      ? "Edit waiter"
+                      : "Add waiter"
+                    : editingWaiter
+                      ? "Edit staff user"
+                      : "Add user"}
+                </h3>
               </div>
               <button className="icon-btn" onClick={closeWaiterModal} aria-label="Close waiter form">
                 ×
@@ -1703,27 +2547,28 @@ function AdminScreen({ token }: { token: string }) {
                 />
               </label>
 
-              {!editingWaiter && (
-                <label>
-                  Username
-                  <input
-                    value={waiterForm.username}
-                    onChange={(event) => setWaiterForm((current) => ({ ...current, username: event.target.value }))}
-                    autoComplete="username"
-                    required
-                  />
-                </label>
-              )}
+              <label>
+                Username
+                <input
+                  value={waiterForm.username}
+                  onChange={(event) => setWaiterForm((current) => ({ ...current, username: event.target.value }))}
+                  autoComplete="username"
+                  required
+                />
+              </label>
 
-              {editingWaiter && (
+              {activeTab !== "waiters" && (
                 <label>
-                  Username
-                  <input
-                    value={waiterForm.username}
-                    onChange={(event) => setWaiterForm((current) => ({ ...current, username: event.target.value }))}
-                    autoComplete="username"
+                  Role
+                  <select
+                    value={waiterForm.role}
+                    onChange={(event) => setWaiterForm((current) => ({ ...current, role: event.target.value as UserRole | "" }))}
                     required
-                  />
+                  >
+                    <option value="" disabled>Select a role</option>
+                    <option value="ADMIN">Admin</option>
+                    <option value="CASHIER">Cashier</option>
+                  </select>
                 </label>
               )}
 
@@ -1744,11 +2589,308 @@ function AdminScreen({ token }: { token: string }) {
                   Cancel
                 </button>
                 <button type="submit" className="primary-btn">
-                  {editingWaiter ? "Save changes" : "Create waiter"}
+                  {editingWaiter
+                    ? "Save changes"
+                    : activeTab === "waiters"
+                      ? "Create waiter"
+                      : "Create user"}
                 </button>
               </div>
             </form>
           </div>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function WaiterModeScreen({ token }: { token: string }) {
+  const [tables, setTables] = useState<Table[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
+  const [activeOrderId, setActiveOrderId] = useState<number | null>(null);
+  const [quantities, setQuantities] = useState<Record<number, number>>({});
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const selectedTable = tables.find((table) => table.id === selectedTableId) ?? null;
+
+  useEffect(() => {
+    void loadData();
+  }, [token]);
+
+  async function loadData() {
+    setLoading(true);
+    setError("");
+
+    try {
+      const [tablesResponse, productsResponse] = await Promise.all([
+        request("/api/tables", {}, token),
+        request("/api/products", {}, token),
+      ]);
+
+      setTables(tablesResponse as Table[]);
+      setProducts(productsResponse as Product[]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load waiter console data");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const orderedProducts = useMemo(() => {
+    return products.filter((product) => (quantities[product.id] ?? 0) > 0);
+  }, [products, quantities]);
+
+  const cartTotal = useMemo(() => {
+    return orderedProducts.reduce((sum, product) => {
+      const quantity = quantities[product.id] ?? 0;
+      const priceMinor = parseMinorUnits(product.price);
+      if (priceMinor === null) throw new Error(`Invalid price for ${product.name}`);
+      return sum + priceMinor * BigInt(quantity);
+    }, 0n);
+  }, [orderedProducts, quantities]);
+
+  function updateQuantity(productId: number, delta: number) {
+    setSuccess("");
+    setQuantities((current) => {
+      const nextQuantity = Math.max(0, (current[productId] ?? 0) + delta);
+      if (nextQuantity === 0) {
+        const { [productId]: _removed, ...rest } = current;
+        return rest;
+      }
+      return { ...current, [productId]: nextQuantity };
+    });
+  }
+
+  async function openTable(tableId: number) {
+    setSelectedTableId(tableId);
+    setQuantities({});
+    setSuccess("");
+
+    try {
+      const activeOrder = await request(`/api/orders/table/${tableId}/active`, {}, token);
+      setActiveOrderId(activeOrder && typeof activeOrder === "object" && "id" in activeOrder ? Number((activeOrder as { id: number }).id) : null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load table order");
+    }
+  }
+
+  async function submitOrder() {
+    if (submittingRef.current) return;
+    if (selectedTableId == null) {
+      setError("Select a table before placing the order.");
+      return;
+    }
+
+    const items = Object.entries(quantities)
+      .filter(([, quantity]) => quantity > 0)
+      .map(([productId, quantity]) => ({
+        productId: Number(productId),
+        quantity: Number(quantity),
+      }));
+
+    if (!items.length) {
+      setError("Select at least one item before placing the order.");
+      return;
+    }
+
+    submittingRef.current = true;
+    setSubmitting(true);
+    setError("");
+
+    try {
+      const endpoint = activeOrderId
+        ? `/api/orders/${activeOrderId}/add-items`
+        : "/api/orders";
+
+      const body = activeOrderId
+        ? { items }
+        : { tableId: selectedTableId, items };
+
+      const response = await request(endpoint, {
+        method: activeOrderId ? "PATCH" : "POST",
+        body: JSON.stringify(body),
+      }, token);
+
+      setSuccess(
+        activeOrderId
+          ? "Items were added to the active table order."
+          : `Order created for ${selectedTable ? (selectedTable.isParcel ? "Parcel" : `Table ${selectedTable.number}`) : "the selected table"}.`,
+      );
+      setQuantities({});
+      const createdOrderId = Number((response as { order?: { id?: number } })?.order?.id);
+      setActiveOrderId(activeOrderId ?? (Number.isInteger(createdOrderId) && createdOrderId > 0 ? createdOrderId : null));
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to create the order");
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  }
+
+  async function sendToCashier() {
+    if (submittingRef.current) return;
+    if (!activeOrderId) {
+      setError("There is no active order to send to the cashier.");
+      return;
+    }
+
+    submittingRef.current = true;
+    setSubmitting(true);
+    setError("");
+
+    try {
+      await request(`/api/orders/${activeOrderId}/send-to-cashier`, { method: "PATCH" }, token);
+      setSuccess("Order sent to cashier successfully.");
+      setActiveOrderId(null);
+      setQuantities({});
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to send the order to cashier");
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="content-shell">
+      <div className="page-header admin-header">
+        <div>
+          <div className="eyebrow">Service flow</div>
+          <h2>Waiter Console</h2>
+          <p className="page-subtitle">Create waiter orders directly from the desktop POS.</p>
+        </div>
+        <button className="secondary-btn" onClick={() => void loadData()}>
+          Refresh
+        </button>
+      </div>
+
+      {error && <div className="error-banner">{error}</div>}
+      {success && <div className="success-banner">{success}</div>}
+
+      {loading ? (
+        <div className="panel"><div className="empty-state"><div className="empty-icon">…</div><h4>Loading waiter console...</h4></div></div>
+      ) : (
+        <div className="billing-layout">
+          <section className="panel order-panel">
+            <div className="panel-heading">
+              <div>
+                <div className="eyebrow">Choose service</div>
+                <h3>Tables</h3>
+              </div>
+            </div>
+
+            <div className="data-list">
+              {tables.map((table) => (
+                <button
+                  key={table.id}
+                  type="button"
+                  className={selectedTableId === table.id ? "order-card selected" : "order-card"}
+                  onClick={() => void openTable(table.id)}
+                >
+                  <div className="order-card-top">
+                    <h4>{table.isParcel ? "Parcel" : `Table ${table.number}`}</h4>
+                    <span className={`status-text ${table.status === "AVAILABLE" ? "success" : "danger"}`}>
+                      {table.status}
+                    </span>
+                  </div>
+                  <div className="order-card-grid">
+                    <span>{table.isParcel ? "Parcel order" : "Restaurant table"}</span>
+                    <strong>{table.status === "AVAILABLE" ? "Open for ordering" : "Order in progress"}</strong>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel bill-panel">
+            {!selectedTable ? (
+              <div className="bill-placeholder">
+                <div>
+                  <div className="placeholder-icon">☰</div>
+                  <h3>Select a table</h3>
+                  <p>Pick a table to view the menu and create a waiter order.</p>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="bill-header">
+                  <div>
+                    <span className="eyebrow">Order</span>
+                    <h3>{selectedTable.isParcel ? "Parcel" : `Table ${selectedTable.number}`}</h3>
+                  </div>
+                  <span className={`status-text ${selectedTable.status === "AVAILABLE" ? "success" : "danger"}`}>
+                    {selectedTable.status}
+                  </span>
+                </div>
+
+                <div className="bill-items">
+                  {products.map((product) => {
+                    const quantity = quantities[product.id] ?? 0;
+                    const stock = Number(product.stock ?? 0);
+                    return (
+                      <div className="bill-item" key={product.id}>
+                        <div>
+                          <strong>{product.name}</strong>
+                          <span>{money(product.price)} · Stock {stock}</span>
+                        </div>
+                        <div className="card-actions">
+                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, -1)} disabled={quantity === 0}>
+                            −
+                          </button>
+                          <strong>{quantity}</strong>
+                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, 1)} disabled={quantity >= stock}>
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="bill-total-row">
+                  <span>Selected total</span>
+                  <strong>{money(minorUnitsToNumber(cartTotal))}</strong>
+                </div>
+
+                <div className="action-row">
+                  <button type="button" className="secondary-btn" onClick={() => setQuantities({})}>
+                    Clear
+                  </button>
+                </div>
+
+                <div className="action-row">
+                  <button
+                    type="button"
+                    className="primary-btn full"
+                    onClick={() => void submitOrder()}
+                    disabled={submitting}
+                  >
+                    {submitting ? "Processing..." : activeOrderId ? "Add items to order" : "Place order"}
+                  </button>
+                </div>
+
+                {activeOrderId && (
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="secondary-btn full"
+                      onClick={() => void sendToCashier()}
+                      disabled={submitting}
+                    >
+                      Send to cashier
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
         </div>
       )}
     </main>

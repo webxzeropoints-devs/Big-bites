@@ -2,6 +2,15 @@ import { Router } from "express";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
 import { calculateGstAmounts } from "../utils/gst.js";
+import {
+  toDecimalString,
+  multiplyMinorUnits,
+  toMinorUnits,
+} from "../utils/currency.js";
+import {
+  lockOrderSequence,
+  resetOrderSequenceIfEmpty,
+} from "../utils/orderSequence.js";
 
 const router = Router();
 
@@ -28,24 +37,26 @@ class OrderRequestError extends Error {
 // Create a NEW order only when the table has no active order.
 // ============================================================
 
-router.post("/", requireRoles("WAITER"), async (req, res) => {
+router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
   try {
-    const { tableId, waiterId, items } = req.body;
+    const { tableId, items } = req.body;
 
     const parsedTableId = Number(tableId);
-    const parsedWaiterId = Number(waiterId);
+    const authenticatedUser = req.user;
 
     if (
       !Number.isInteger(parsedTableId) ||
       parsedTableId <= 0 ||
-      !Number.isInteger(parsedWaiterId) ||
-      parsedWaiterId <= 0 ||
       !Array.isArray(items) ||
       items.length === 0
     ) {
       return res.status(400).json({
-        message: "tableId, waiterId and items are required",
+        message: "tableId and items are required",
       });
+    }
+
+    if (!authenticatedUser) {
+      return res.status(401).json({ message: "Authentication required" });
     }
 
     const table = await prisma.restaurantTable.findUnique({
@@ -60,21 +71,16 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
       });
     }
 
-    const waiter = await prisma.user.findUnique({
+    const orderOwner = await prisma.user.findUnique({
       where: {
-        id: parsedWaiterId,
+        id: authenticatedUser.id,
       },
+      select: { id: true, role: true },
     });
 
-    if (!waiter || waiter.role !== "WAITER") {
-      return res.status(404).json({
-        message: "Waiter not found",
-      });
-    }
-
-    if (req.user?.id !== parsedWaiterId) {
-      return res.status(403).json({
-        message: "Orders may only be created for the authenticated waiter",
+    if (!orderOwner || orderOwner.role !== authenticatedUser.role) {
+      return res.status(401).json({
+        message: "Authenticated user is no longer valid",
       });
     }
 
@@ -110,9 +116,10 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
     const newItems: {
       productId: number;
       quantity: number;
-      unitPrice: number;
-      subtotal: number;
+      unitPrice: string;
+      subtotal: string;
     }[] = [];
+    let totalMinor = 0n;
 
     for (const [productId, quantity] of productQuantities.entries()) {
       const product = await prisma.product.findUnique({
@@ -133,23 +140,37 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
         });
       }
 
-      const unitPrice = Number(product.price);
-      const subtotal = unitPrice * quantity;
+      const unitPriceMinor = toMinorUnits(
+        String(product.price),
+        `Price for ${product.name}`,
+      );
+      const subtotalMinor = multiplyMinorUnits(unitPriceMinor, quantity);
+      totalMinor += subtotalMinor;
 
       newItems.push({
         productId,
         quantity,
-        unitPrice,
-        subtotal,
+        unitPrice: toDecimalString(unitPriceMinor),
+        subtotal: toDecimalString(subtotalMinor),
       });
     }
 
-    const total = newItems.reduce(
-      (sum, item) => sum + item.subtotal,
-      0,
-    );
+    let total: string;
+    try {
+      total = toDecimalString(totalMinor);
+    } catch (error) {
+      throw new OrderRequestError(
+        400,
+        error instanceof Error
+          ? error.message
+          : "Order total exceeds the supported amount",
+      );
+    }
 
     const result = await prisma.$transaction(async (tx) => {
+      await lockOrderSequence(tx);
+      await resetOrderSequenceIfEmpty(tx);
+
       await tx.$queryRaw`
         SELECT "id"
         FROM "RestaurantTable"
@@ -219,7 +240,7 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
       const order = await tx.order.create({
         data: {
           tableId: parsedTableId,
-          waiterId: parsedWaiterId,
+          waiterId: authenticatedUser.id,
           status: "CONFIRMED",
           total,
           items: {
@@ -284,7 +305,7 @@ router.post("/", requireRoles("WAITER"), async (req, res) => {
 
 router.get(
   "/table/:tableId/active",
-  requireRoles("WAITER"),
+  requireRoles("WAITER", "ADMIN"),
   async (req, res) => {
     try {
       const tableId = Number(req.params.tableId);
@@ -352,7 +373,7 @@ router.get(
 
 router.patch(
   "/:id/add-items",
-  requireRoles("WAITER"),
+  requireRoles("WAITER", "ADMIN"),
   async (req, res) => {
     try {
       const orderId = Number(req.params.id);
@@ -382,7 +403,10 @@ router.patch(
         });
       }
 
-      if (req.user?.id !== order.waiterId) {
+      const canManageOrder =
+        req.user?.role === "ADMIN" || req.user?.id === order.waiterId;
+
+      if (!canManageOrder) {
         return res.status(403).json({
           message: "Orders may only be updated by the authenticated waiter",
         });
@@ -441,7 +465,10 @@ router.patch(
           throw new OrderRequestError(404, "Order not found");
         }
 
-        if (req.user?.id !== currentOrder.waiterId) {
+        const canManageOrder =
+          req.user?.role === "ADMIN" || req.user?.id === currentOrder.waiterId;
+
+        if (!canManageOrder) {
           throw new OrderRequestError(
             403,
             "Orders may only be updated by the authenticated waiter",
@@ -459,8 +486,8 @@ router.patch(
           orderId: number;
           productId: number;
           quantity: number;
-          unitPrice: number;
-          subtotal: number;
+          unitPrice: string;
+          subtotal: string;
         }[] = [];
 
         for (const [productId, quantity] of productQuantities.entries()) {
@@ -506,21 +533,26 @@ router.patch(
             );
           }
 
-          const unitPrice = Number(product.price);
+          const unitPriceMinor = toMinorUnits(
+            String(product.price),
+            `Price for ${product.name}`,
+          );
+          const subtotalMinor = multiplyMinorUnits(unitPriceMinor, quantity);
 
           newItems.push({
             orderId,
             productId,
             quantity,
-            unitPrice,
-            subtotal: unitPrice * quantity,
+            unitPrice: toDecimalString(unitPriceMinor),
+            subtotal: toDecimalString(subtotalMinor),
           });
         }
 
-        const additionalTotal = newItems.reduce(
-          (sum, item) => sum + item.subtotal,
-          0,
+        const additionalTotalMinor = newItems.reduce(
+          (sum, item) => sum + toMinorUnits(item.subtotal),
+          0n,
         );
+        const additionalTotal = toDecimalString(additionalTotalMinor);
 
         await tx.orderItem.createMany({
           data: newItems,
@@ -586,7 +618,7 @@ router.patch(
 
 router.patch(
   "/:id/send-to-cashier",
-  requireRoles("WAITER"),
+  requireRoles("WAITER", "ADMIN"),
   async (req, res) => {
     try {
       const orderId = Number(req.params.id);
@@ -612,7 +644,10 @@ router.patch(
           throw new OrderRequestError(404, "Order not found");
         }
 
-        if (req.user?.id !== currentOrder.waiterId) {
+        const canManageOrder =
+          req.user?.role === "ADMIN" || req.user?.id === currentOrder.waiterId;
+
+        if (!canManageOrder) {
           throw new OrderRequestError(
             403,
             "Orders may only be sent by the authenticated waiter",
@@ -658,22 +693,25 @@ router.patch(
           create: { id: 1, gstRate: 5 },
           update: {},
         });
-        const gstRate = Number(settings.gstRate);
+        const gstRate = String(settings.gstRate);
         const { grandTotal } = calculateGstAmounts(
-          Number(currentOrder.total),
-          gstRate,
+          String(currentOrder.total),
+          settings.gstEnabled ? gstRate : "0",
+        );
+        const paymentAmount = toDecimalString(
+          toMinorUnits(grandTotal, "Order total"),
         );
 
         if (currentOrder.payment) {
           await tx.payment.update({
             where: { orderId },
-            data: { amount: grandTotal },
+            data: { amount: paymentAmount },
           });
         } else {
           await tx.payment.create({
             data: {
               orderId,
-              amount: grandTotal,
+              amount: paymentAmount,
               status: "PENDING",
             },
           });
@@ -681,7 +719,11 @@ router.patch(
 
         return tx.order.update({
           where: { id: orderId },
-          data: { status: "READY_FOR_BILLING", gstRate },
+          data: {
+            status: "READY_FOR_BILLING",
+            gstRate,
+            gstEnabled: settings.gstEnabled,
+          },
           include: {
             items: { include: { product: true } },
             table: true,
@@ -723,7 +765,7 @@ router.patch(
 
 router.get(
   "/table/:tableId",
-  requireRoles("WAITER"),
+  requireRoles("WAITER", "ADMIN"),
   async (req, res) => {
     try {
       const tableId = Number(req.params.tableId);
@@ -784,12 +826,12 @@ router.get(
 // ============================================================
 // GET /api/orders
 // Get all orders.
-// Admin / Manager / Cashier only.
+// Admin / Cashier only.
 // ============================================================
 
 router.get(
   "/",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const orders = await prisma.order.findMany({
@@ -824,12 +866,12 @@ router.get(
 // ============================================================
 // GET /api/orders/:id
 // Get one specific order.
-// Admin / Manager / Cashier only.
+// Admin / Cashier only.
 // ============================================================
 
 router.get(
   "/:id",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const id = Number(req.params.id);

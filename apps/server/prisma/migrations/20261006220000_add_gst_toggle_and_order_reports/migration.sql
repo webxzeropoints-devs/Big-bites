@@ -1,0 +1,6 @@
+ALTER TABLE "RestaurantSettings"
+ADD COLUMN "gstEnabled" BOOLEAN NOT NULL DEFAULT true,
+ADD COLUMN "orderReportsPath" TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE "Order"
+ADD COLUMN "gstEnabled" BOOLEAN NOT NULL DEFAULT true;

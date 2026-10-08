@@ -1,0 +1,107 @@
+◇ injected env (0) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+LAN discovery listening on udp://0.0.0.0:3001
+Server running on http://0.0.0.0:3000
+GET ACTIVE ORDER 9
+null
+GET ACTIVE ORDER 9
+null
+GET ACTIVE ORDER 9
+{
+  id: 24,
+  status: 'CONFIRMED',
+  total: 90,
+  gstRate: 0,
+  discountType: null,
+  discountValue: null,
+  discountAmount: 0,
+  createdAt: 2026-10-06T12:13:46.479Z,
+  updatedAt: 2026-10-06T12:13:46.479Z,
+  tableId: 9,
+  waiterId: 4,
+  items: [
+    {
+      id: 53,
+      quantity: 2,
+      unitPrice: 45,
+      subtotal: 90,
+      orderId: 24,
+      productId: 8,
+      product: [Object]
+    }
+  ],
+  table: {
+    id: 9,
+    number: 0,
+    isParcel: true,
+    status: 'OCCUPIED',
+    createdAt: 2026-09-22T22:39:17.954Z,
+    updatedAt: 2026-10-06T12:13:46.484Z
+  },
+  waiter: {
+    id: 4,
+    name: 'Waiter User',
+    username: 'waiter',
+    role: 'WAITER',
+    createdAt: 2026-09-16T11:16:56.107Z,
+    updatedAt: 2026-10-05T11:01:50.343Z
+  },
+  payment: {
+    id: 26,
+    amount: 90,
+    method: null,
+    status: 'PENDING',
+    paidAt: null,
+    createdAt: 2026-10-06T12:13:46.479Z,
+    orderId: 24
+  }
+}
+GET ACTIVE ORDER 9
+{
+  id: 24,
+  status: 'CONFIRMED',
+  total: 90,
+  gstRate: 0,
+  discountType: null,
+  discountValue: null,
+  discountAmount: 0,
+  createdAt: 2026-10-06T12:13:46.479Z,
+  updatedAt: 2026-10-06T12:13:46.479Z,
+  tableId: 9,
+  waiterId: 4,
+  items: [
+    {
+      id: 53,
+      quantity: 2,
+      unitPrice: 45,
+      subtotal: 90,
+      orderId: 24,
+      productId: 8,
+      product: [Object]
+    }
+  ],
+  table: {
+    id: 9,
+    number: 0,
+    isParcel: true,
+    status: 'OCCUPIED',
+    createdAt: 2026-09-22T22:39:17.954Z,
+    updatedAt: 2026-10-06T12:13:46.484Z
+  },
+  waiter: {
+    id: 4,
+    name: 'Waiter User',
+    username: 'waiter',
+    role: 'WAITER',
+    createdAt: 2026-09-16T11:16:56.107Z,
+    updatedAt: 2026-10-05T11:01:50.343Z
+  },
+  payment: {
+    id: 26,
+    amount: 90,
+    method: null,
+    status: 'PENDING',
+    paidAt: null,
+    createdAt: 2026-10-06T12:13:46.479Z,
+    orderId: 24
+  }
+}

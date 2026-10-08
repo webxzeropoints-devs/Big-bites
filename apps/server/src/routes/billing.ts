@@ -2,65 +2,23 @@ import { Router } from "express";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
 import type { DiscountType } from "@prisma/client";
-import { calculateGstAmounts } from "../utils/gst.js";
 import { calculateDiscount, type DiscountKind } from "../utils/discount.js";
+import {
+  fromMinorUnits,
+  toDecimalString,
+  toMinorUnits,
+} from "../utils/currency.js";
+import {
+  calculateOrderAmounts,
+  sumOrderAmounts,
+} from "../utils/financial.js";
+import type { CurrencyValue } from "../utils/currency.js";
+import {
+  exportPaidOrderReport,
+  exportPaidOrderReports,
+} from "../utils/orderReports.js";
 
 const router = Router();
-
-type TaxableOrder = {
-  total: unknown;
-  gstRate: unknown;
-  discountType?: DiscountType | null;
-  discountValue?: unknown;
-  discountAmount?: unknown;
-};
-
-const orderGstAmounts = (order: TaxableOrder) =>
-  calculateGstAmounts(Number(order.total), Number(order.gstRate));
-
-const orderDiscountAmounts = (order: TaxableOrder) => {
-  const amounts = orderGstAmounts(order);
-  return calculateDiscount(
-    amounts.grandTotal,
-    order.discountType ?? null,
-    order.discountValue == null ? null : Number(order.discountValue),
-  );
-};
-
-const withGstAmounts = <T extends TaxableOrder>(order: T) => {
-  const amounts = orderGstAmounts(order);
-  const discount = orderDiscountAmounts(order);
-  const discountAmount = Number(order.discountAmount ?? discount.discountAmount);
-  return {
-    ...order,
-    ...amounts,
-    discountAmount,
-    finalTotal: Math.round((amounts.grandTotal - discountAmount + Number.EPSILON) * 100) / 100,
-  };
-};
-
-function sumGstAmounts(orders: TaxableOrder[]) {
-  const amounts = orders.map(orderGstAmounts);
-  const sumCurrency = (
-    select: (amount: (typeof amounts)[number], index: number) => number,
-  ) =>
-    amounts.reduce(
-      (sum, amount, index) => sum + Math.round(select(amount, index) * 100),
-      0,
-    ) / 100;
-  const subtotal = sumCurrency((amount) => amount.subtotal);
-  const cgstAmount = sumCurrency((amount) => amount.cgstAmount);
-  const sgstAmount = sumCurrency((amount) => amount.sgstAmount);
-  const gstAmount = sumCurrency((amount) => amount.gstAmount);
-  const discountAmount = sumCurrency((_, index) =>
-    Number(orders[index].discountAmount ?? 0),
-  );
-  const grandTotal = sumCurrency((amount, index) =>
-    amount.grandTotal - Number(orders[index].discountAmount ?? 0),
-  );
-
-  return { subtotal, cgstAmount, sgstAmount, gstAmount, discountAmount, grandTotal };
-}
 
 class BillingRequestError extends Error {
   constructor(
@@ -68,6 +26,35 @@ class BillingRequestError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+function parseAmountReceived(method: string, rawValue: unknown) {
+  if (method !== "CASH") {
+    if (rawValue !== undefined) {
+      throw new BillingRequestError(
+        400,
+        "Amount received is only valid for cash payments",
+      );
+    }
+    return undefined;
+  }
+  if (rawValue === undefined) return undefined;
+  if (typeof rawValue !== "number" && typeof rawValue !== "string") {
+    throw new BillingRequestError(
+      400,
+      "Amount received must be a valid non-negative amount",
+    );
+  }
+  try {
+    return toMinorUnits(rawValue as CurrencyValue, "Amount received");
+  } catch (error) {
+    throw new BillingRequestError(
+      400,
+      error instanceof Error
+        ? error.message
+        : "Amount received must be a valid non-negative amount",
+    );
   }
 }
 
@@ -82,7 +69,7 @@ class BillingRequestError extends Error {
 */
 router.get(
   "/orders",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const orders = await prisma.order.findMany({
@@ -114,6 +101,8 @@ router.get(
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
         select: {
+          gstEnabled: true,
+          gstRate: true,
           restaurantAddress: true,
           fssaiEnabled: true,
           fssaiNumber: true,
@@ -124,7 +113,15 @@ router.get(
 
       return res.json(
         orders.map((order) => ({
-          ...withGstAmounts(order),
+          ...order,
+          ...calculateOrderAmounts({
+            ...order,
+            gstRate:
+              settings?.gstEnabled === false
+                ? 0
+                : settings?.gstRate ?? order.gstRate,
+          }),
+          gstEnabled: settings?.gstEnabled ?? true,
           restaurantAddress: settings?.restaurantAddress ?? "",
           fssaiEnabled: settings?.fssaiEnabled ?? false,
           fssaiNumber: settings?.fssaiNumber ?? "",
@@ -151,8 +148,9 @@ router.get(
 */
 router.get(
   "/completed",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
+    
     try {
       const orders = await prisma.order.findMany({
         where: {
@@ -187,6 +185,8 @@ router.get(
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
         select: {
+          gstEnabled: true,
+          gstRate: true,
           restaurantAddress: true,
           fssaiEnabled: true,
           fssaiNumber: true,
@@ -197,7 +197,9 @@ router.get(
 
       return res.json(
         orders.map((order) => ({
-          ...withGstAmounts(order),
+          ...order,
+          ...calculateOrderAmounts(order),
+          gstEnabled: order.gstEnabled,
           restaurantAddress: settings?.restaurantAddress ?? "",
           fssaiEnabled: settings?.fssaiEnabled ?? false,
           fssaiNumber: settings?.fssaiNumber ?? "",
@@ -224,7 +226,7 @@ router.get(
 */
 router.get(
   "/orders/:id",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const id = Number(req.params.id);
@@ -265,6 +267,8 @@ router.get(
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
         select: {
+          gstEnabled: true,
+          gstRate: true,
           restaurantAddress: true,
           fssaiEnabled: true,
           fssaiNumber: true,
@@ -283,10 +287,21 @@ router.get(
         status: order.status,
         items: order.items,
         total: order.total,
-        ...orderGstAmounts(order),
+        ...calculateOrderAmounts({
+          ...order,
+          gstRate:
+            order.payment?.status === "PAID"
+              ? order.gstRate
+              : settings?.gstEnabled === false
+                ? 0
+                : settings?.gstRate ?? order.gstRate,
+        }),
+        gstEnabled:
+          order.payment?.status === "PAID"
+            ? order.gstEnabled
+            : settings?.gstEnabled ?? true,
         discountType: order.discountType,
         discountValue: order.discountValue,
-        discountAmount: order.discountAmount,
         restaurantAddress: settings?.restaurantAddress ?? "",
         fssaiEnabled: settings?.fssaiEnabled ?? false,
         fssaiNumber: settings?.fssaiNumber ?? "",
@@ -307,7 +322,7 @@ router.get(
 
 router.patch(
   "/orders/:id/discount",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const orderId = Number(req.params.id);
@@ -327,37 +342,24 @@ router.patch(
         });
       }
 
-      let discountValue: number | null = null;
+      let discountValue: string | null = null;
       if (rawValue !== null && rawValue !== undefined && rawValue !== "") {
-        if (
-          (typeof rawValue !== "number" && typeof rawValue !== "string") ||
-          (typeof rawValue === "string" && rawValue.trim() === "") ||
-          !Number.isFinite(Number(rawValue))
-        ) {
+        if (typeof rawValue !== "number" && typeof rawValue !== "string") {
           return res.status(400).json({
             message: "Discount must be a valid non-negative number",
           });
         }
-        discountValue = Number(rawValue);
-      }
-
-      if ((rawType === null) !== (discountValue === null)) {
-        return res.status(400).json({
-          message: "Select a discount type and enter a discount value",
-        });
-      }
-      if (discountValue !== null && discountValue < 0) {
-        return res.status(400).json({
-          message: "Discount must be a valid non-negative number",
-        });
-      }
-      if (
-        discountValue !== null &&
-        Math.abs(discountValue * 100 - Math.round(discountValue * 100)) > 1e-8
-      ) {
-        return res.status(400).json({
-          message: "Discount can have at most 2 decimal places",
-        });
+        try {
+          discountValue = toDecimalString(
+            toMinorUnits(rawValue, "Discount"),
+          );
+        } catch (error) {
+          return res.status(400).json({
+            message: error instanceof Error
+              ? error.message
+              : "Discount must be a valid non-negative amount",
+          });
+        }
       }
 
       const updated = await prisma.$transaction(async (tx) => {
@@ -368,11 +370,18 @@ router.patch(
           FOR UPDATE
         `;
 
-        const order = await tx.order.findUnique({ where: { id: orderId } });
+        const order = await tx.order.findUnique({
+          where: { id: orderId },
+          include: { payment: true },
+        });
         if (!order) {
           throw new BillingRequestError(404, "Order not found");
         }
-        if (order.status !== "READY_FOR_BILLING") {
+        if (
+          order.status !== "READY_FOR_BILLING" ||
+          order.payment?.status === "PAID" ||
+          order.payment?.status === "REFUNDED"
+        ) {
           throw new BillingRequestError(
             409,
             "Discounts can only be changed before payment",
@@ -382,7 +391,7 @@ router.patch(
         let discount;
         try {
           discount = calculateDiscount(
-            orderGstAmounts(order).grandTotal,
+            String(order.total),
             rawType as DiscountKind | null,
             discountValue,
           );
@@ -394,22 +403,54 @@ router.patch(
         }
 
         const nextType = rawType as DiscountType | null;
+        const settings = await tx.restaurantSettings.findUnique({
+          where: { id: 1 },
+          select: { gstEnabled: true, gstRate: true },
+        });
+        const amounts = calculateOrderAmounts({
+          ...order,
+          gstRate:
+            settings?.gstEnabled === false
+              ? 0
+              : settings?.gstRate ?? order.gstRate,
+          total: String(order.total),
+          discountType: nextType,
+          discountValue,
+        });
         const saved = await tx.order.update({
           where: { id: orderId },
           data: {
             discountType: nextType,
             discountValue,
-            discountAmount: discount.discountAmount,
+            discountAmount: toDecimalString(
+              toMinorUnits(discount.discountAmount, "Discount"),
+            ),
           },
         });
-        return { saved, discount };
+        if (order.payment) {
+          await tx.payment.update({
+            where: { orderId },
+            data: {
+              amount: toDecimalString(
+                toMinorUnits(amounts.grandTotal, "Order total"),
+              ),
+            },
+          });
+        }
+
+        return {
+          saved,
+          discount,
+          amounts,
+          gstEnabled: settings?.gstEnabled ?? true,
+        };
       });
 
       return res.json({
         discountType: updated.saved.discountType,
         discountValue: updated.saved.discountValue,
-        discountAmount: updated.saved.discountAmount,
-        finalTotal: updated.discount.grandTotal,
+        gstEnabled: updated.gstEnabled,
+        ...updated.amounts,
       });
     } catch (error) {
       if (error instanceof BillingRequestError) {
@@ -430,11 +471,12 @@ router.patch(
 */
 router.post(
   "/orders/:id/pay",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const orderId = Number(req.params.id);
-      const { method, amountReceived } = req.body;
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const { method, amountReceived } = body;
 
       if (!Number.isInteger(orderId) || orderId <= 0) {
         return res.status(400).json({ message: "Invalid order ID" });
@@ -447,17 +489,7 @@ router.post(
         });
       }
 
-      const parsedAmountReceived =
-        amountReceived === undefined ? undefined : Number(amountReceived);
-      if (
-        method === "CASH" &&
-        parsedAmountReceived !== undefined &&
-        (!Number.isFinite(parsedAmountReceived) || parsedAmountReceived < 0)
-      ) {
-        return res.status(400).json({
-          message: "Amount received must be a valid non-negative number",
-        });
-      }
+      const receivedMinor = parseAmountReceived(method, amountReceived);
 
       const result = await prisma.$transaction(async (tx) => {
         const initialOrder = await tx.order.findUnique({
@@ -505,18 +537,22 @@ router.post(
           );
         }
 
-        const gstAmounts = orderGstAmounts(order);
-        const discountAmounts = orderDiscountAmounts(order);
-        const total = Math.round(
-          (gstAmounts.grandTotal -
-            Number(order.discountAmount ?? discountAmounts.discountAmount) +
-            Number.EPSILON) *
-            100,
-        ) / 100;
+        const settings = await tx.restaurantSettings.upsert({
+          where: { id: 1 },
+          create: { id: 1, gstRate: 5, gstEnabled: true },
+          update: {},
+        });
+        const billableOrder = {
+          ...order,
+          gstRate: settings.gstEnabled ? settings.gstRate : 0,
+          gstEnabled: settings.gstEnabled,
+        };
+        const gstAmounts = calculateOrderAmounts(billableOrder);
+        const totalMinor = toMinorUnits(gstAmounts.grandTotal);
         if (
           method === "CASH" &&
-          parsedAmountReceived !== undefined &&
-          parsedAmountReceived < total
+          receivedMinor !== undefined &&
+          receivedMinor < totalMinor
         ) {
           throw new BillingRequestError(
             400,
@@ -525,11 +561,22 @@ router.post(
         }
 
         const paidAt = new Date();
+        const received = receivedMinor ?? totalMinor;
+        const changeMinor =
+          method === "CASH" ? received - totalMinor : undefined;
         const payment = order.payment
           ? await tx.payment.update({
               where: { orderId },
               data: {
-                amount: total,
+                amount: toDecimalString(totalMinor),
+                amountReceived:
+                  receivedMinor === undefined && method !== "CASH"
+                    ? null
+                    : toDecimalString(received),
+                change:
+                  changeMinor === undefined
+                    ? null
+                    : toDecimalString(changeMinor),
                 method,
                 status: "PAID",
                 paidAt,
@@ -538,7 +585,15 @@ router.post(
           : await tx.payment.create({
               data: {
                 orderId,
-                amount: total,
+                amount: toDecimalString(totalMinor),
+                amountReceived:
+                  receivedMinor === undefined && method !== "CASH"
+                    ? null
+                    : toDecimalString(received),
+                change:
+                  changeMinor === undefined
+                    ? null
+                    : toDecimalString(changeMinor),
                 method,
                 status: "PAID",
                 paidAt,
@@ -547,7 +602,11 @@ router.post(
 
         const updatedOrder = await tx.order.update({
           where: { id: orderId },
-          data: { status: "COMPLETED" },
+          data: {
+            status: "COMPLETED",
+            gstRate: billableOrder.gstRate,
+            gstEnabled: billableOrder.gstEnabled,
+          },
           include: {
             items: { include: { product: true } },
             table: true,
@@ -579,17 +638,41 @@ router.post(
           });
         }
 
-        return { payment, order: updatedOrder, ...gstAmounts, discountAmounts };
+        return {
+          payment,
+          order: updatedOrder,
+          ...gstAmounts,
+        };
       });
 
-      const received = parsedAmountReceived ?? result.discountAmounts.grandTotal;
+      const totalMinor = toMinorUnits(result.grandTotal);
+      const received = receivedMinor ?? totalMinor;
+      let orderReportError: string | undefined;
+      try {
+        await exportPaidOrderReport(result.order.id);
+      } catch (error) {
+        console.error("Paid order report export failed:", {
+          orderId: result.order.id,
+          error,
+        });
+        orderReportError =
+          error instanceof Error
+            ? error.message
+            : "The monthly Excel order report could not be updated.";
+      }
       return res.json({
         message: "Payment received",
         ...result,
-        total: result.discountAmounts.grandTotal,
-        finalTotal: result.discountAmounts.grandTotal,
-        amountReceived: received,
-        change: method === "CASH" ? received - result.discountAmounts.grandTotal : 0,
+        gstEnabled: result.order.gstEnabled,
+        total: fromMinorUnits(totalMinor),
+        finalTotal: fromMinorUnits(totalMinor),
+        amountReceived:
+          method === "CASH" ? fromMinorUnits(received) : null,
+        change:
+          method === "CASH"
+            ? fromMinorUnits(received - totalMinor)
+            : null,
+        ...(orderReportError ? { orderReportError } : {}),
       });
     } catch (error) {
       if (error instanceof BillingRequestError) {
@@ -620,7 +703,7 @@ router.post(
 */
 router.get(
   "/tables/:tableId",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const tableId = Number(req.params.tableId);
@@ -675,10 +758,11 @@ router.get(
         });
       }
 
-      const amounts = sumGstAmounts(orders);
       const settings = await prisma.restaurantSettings.findUnique({
         where: { id: 1 },
         select: {
+          gstEnabled: true,
+          gstRate: true,
           restaurantAddress: true,
           fssaiEnabled: true,
           fssaiNumber: true,
@@ -686,6 +770,15 @@ router.get(
           gstinNumber: true,
         },
       });
+      const billableOrders = orders.map((order) => ({
+        ...order,
+        gstRate:
+          settings?.gstEnabled === false
+            ? 0
+            : settings?.gstRate ?? order.gstRate,
+        gstEnabled: settings?.gstEnabled ?? true,
+      }));
+      const amounts = sumOrderAmounts(billableOrders);
 
       return res.json({
         tableId: table.id,
@@ -694,7 +787,10 @@ router.get(
           ? "Parcel"
           : `Table ${table.number}`,
         orderCount: orders.length,
-        orders: orders.map(withGstAmounts),
+        orders: billableOrders.map((order) => ({
+          ...order,
+          ...calculateOrderAmounts(order),
+        })),
         restaurantAddress: settings?.restaurantAddress ?? "",
         fssaiEnabled: settings?.fssaiEnabled ?? false,
         fssaiNumber: settings?.fssaiNumber ?? "",
@@ -732,11 +828,12 @@ router.get(
 */
 router.post(
   "/tables/:tableId/pay",
-  requireRoles("ADMIN", "MANAGER", "CASHIER"),
+  requireRoles("ADMIN", "CASHIER"),
   async (req, res) => {
     try {
       const tableId = Number(req.params.tableId);
-      const { method, amountReceived } = req.body;
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const { method, amountReceived } = body;
 
       if (!Number.isInteger(tableId) || tableId <= 0) {
         return res.status(400).json({
@@ -752,21 +849,7 @@ router.post(
         });
       }
 
-      const parsedAmountReceived =
-        amountReceived === undefined
-          ? undefined
-          : Number(amountReceived);
-
-      if (
-        method === "CASH" &&
-        parsedAmountReceived !== undefined &&
-        (!Number.isFinite(parsedAmountReceived) ||
-          parsedAmountReceived < 0)
-      ) {
-        return res.status(400).json({
-          message: "Amount received must be a valid non-negative number",
-        });
-      }
+      const receivedMinor = parseAmountReceived(method, amountReceived);
 
       const table = await prisma.restaurantTable.findUnique({
         where: {
@@ -815,13 +898,23 @@ router.post(
           );
         }
 
-        const amounts = sumGstAmounts(orders);
-        const total = amounts.grandTotal;
+        const settings = await tx.restaurantSettings.upsert({
+          where: { id: 1 },
+          create: { id: 1, gstRate: 5, gstEnabled: true },
+          update: {},
+        });
+        const billableOrders = orders.map((order) => ({
+          ...order,
+          gstRate: settings.gstEnabled ? settings.gstRate : 0,
+          gstEnabled: settings.gstEnabled,
+        }));
+        const amounts = sumOrderAmounts(billableOrders);
+        const totalMinor = toMinorUnits(amounts.grandTotal);
 
         if (
           method === "CASH" &&
-          parsedAmountReceived !== undefined &&
-          parsedAmountReceived < total
+          receivedMinor !== undefined &&
+          receivedMinor < totalMinor
         ) {
           throw new BillingRequestError(
             400,
@@ -831,7 +924,7 @@ router.post(
 
         const payments = [];
 
-        for (const order of orders) {
+        for (const order of billableOrders) {
           if (order.payment?.status === "PAID") {
             throw new BillingRequestError(
               409,
@@ -846,17 +939,37 @@ router.post(
           }
 
           const paidAt = new Date();
-          const orderTotal = Math.round(
-            (orderGstAmounts(order).grandTotal -
-              Number(order.discountAmount ?? 0) +
-              Number.EPSILON) *
-              100,
-          ) / 100;
+          const orderTotalMinor = toMinorUnits(
+            calculateOrderAmounts(order).grandTotal,
+          );
+          const tableChangeMinor =
+            method === "CASH"
+              ? (receivedMinor ?? totalMinor) - totalMinor
+              : undefined;
+          const orderReceivedMinor =
+            tableChangeMinor === undefined
+              ? undefined
+              : orderTotalMinor +
+                (order.id === orders[0].id ? tableChangeMinor : 0n);
+          const orderChangeMinor =
+            tableChangeMinor === undefined
+              ? undefined
+              : order.id === orders[0].id
+                ? tableChangeMinor
+                : 0n;
           const payment = order.payment
             ? await tx.payment.update({
                 where: { orderId: order.id },
                 data: {
-                  amount: orderTotal,
+                  amount: toDecimalString(orderTotalMinor),
+                  amountReceived:
+                    orderReceivedMinor === undefined
+                      ? null
+                      : toDecimalString(orderReceivedMinor),
+                  change:
+                    orderChangeMinor === undefined
+                      ? null
+                      : toDecimalString(orderChangeMinor),
                   method,
                   status: "PAID",
                   paidAt,
@@ -865,7 +978,15 @@ router.post(
             : await tx.payment.create({
                 data: {
                   orderId: order.id,
-                  amount: orderTotal,
+                  amount: toDecimalString(orderTotalMinor),
+                  amountReceived:
+                    orderReceivedMinor === undefined
+                      ? null
+                      : toDecimalString(orderReceivedMinor),
+                  change:
+                    orderChangeMinor === undefined
+                      ? null
+                      : toDecimalString(orderChangeMinor),
                   method,
                   status: "PAID",
                   paidAt,
@@ -880,6 +1001,8 @@ router.post(
             },
             data: {
               status: "COMPLETED",
+              gstRate: order.gstRate,
+              gstEnabled: order.gstEnabled,
             },
           });
         }
@@ -908,22 +1031,35 @@ router.post(
 
         return {
           payments,
-          orders,
+          orders: billableOrders,
           amounts,
-          total,
+          totalMinor,
           tableStatus,
         };
       });
 
-      const received =
-        parsedAmountReceived === undefined
-          ? result.total
-          : parsedAmountReceived;
+      const received = receivedMinor ?? result.totalMinor;
 
       const change =
         method === "CASH"
-          ? received - result.total
-          : 0;
+          ? received - result.totalMinor
+          : 0n;
+      let orderReportErrors: string[] = [];
+      try {
+        await exportPaidOrderReports(
+          result.orders.map((order) => order.id),
+        );
+      } catch (error) {
+        console.error("Table paid order report export failed:", {
+          orderIds: result.orders.map((order) => order.id),
+          error,
+        });
+        orderReportErrors = [
+          error instanceof Error
+            ? error.message
+            : "The monthly Excel order report could not be updated.",
+        ];
+      }
 
       return res.json({
         message: "Table bill paid successfully",
@@ -939,19 +1075,24 @@ router.post(
         orderIds: result.orders.map((order) => order.id),
 
         subtotal: result.amounts.subtotal,
+        taxableSubtotal: result.amounts.taxableSubtotal,
+        discountAmount: result.amounts.discountAmount,
         cgstAmount: result.amounts.cgstAmount,
         sgstAmount: result.amounts.sgstAmount,
         gstAmount: result.amounts.gstAmount,
         grandTotal: result.amounts.grandTotal,
-        total: result.total,
+        total: fromMinorUnits(result.totalMinor),
 
-        amountReceived: received,
+        amountReceived:
+          method === "CASH" ? fromMinorUnits(received) : null,
 
-        change,
+        change:
+          method === "CASH" ? fromMinorUnits(change) : null,
 
         method,
 
         payments: result.payments,
+        ...(orderReportErrors.length > 0 ? { orderReportErrors } : {}),
       });
     } catch (error) {
       if (error instanceof BillingRequestError) {

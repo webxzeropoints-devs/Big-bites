@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'services/api_service.dart';
+import 'utils/currency.dart';
 
 void main() {
   runApp(const HotelWaiterApp());
@@ -17,7 +18,7 @@ class HotelWaiterApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'BIG BITES Waiter',
+      title: 'BB Waiter',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.deepOrange),
       home: const LoginScreen(),
     );
@@ -41,8 +42,53 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool loading = false;
   bool obscurePassword = true;
+  bool discoveringServer = true;
+  bool serverReady = false;
+  String serverStatus = 'Searching for the POS server on this Wi-Fi...';
+
+  @override
+  void initState() {
+    super.initState();
+    discoverServer();
+  }
+
+  Future<void> discoverServer() async {
+    setState(() {
+      discoveringServer = true;
+      serverReady = false;
+      serverStatus = 'Searching for the POS server on this Wi-Fi...';
+    });
+    try {
+      final serverUrl = await ApiService.discoverServer();
+      if (!mounted) return;
+      setState(() {
+        serverReady = true;
+        serverStatus = 'POS server ready at $serverUrl';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        serverStatus = error.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          discoveringServer = false;
+        });
+      }
+    }
+  }
 
   Future<void> login() async {
+    if (!serverReady) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Wait for POS server discovery to finish'),
+        ),
+      );
+      return;
+    }
+
     final username = usernameController.text.trim();
     final password = passwordController.text;
 
@@ -109,10 +155,10 @@ class _LoginScreenState extends State<LoginScreen> {
                 padding: const EdgeInsets.all(24),
                 child: Column(
                   children: [
-                    const Icon(
-                      Icons.restaurant,
-                      size: 70,
-                      color: Colors.deepOrange,
+                    Image.asset(
+                      'assets/big-bites-logo.png',
+                      height: 100,
+                      fit: BoxFit.contain,
                     ),
                     const SizedBox(height: 16),
                     const Text(
@@ -124,9 +170,24 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 6),
                     const Text(
-                      'Waiter App',
+                      'BB Waiter',
                       style: TextStyle(fontSize: 16, color: Colors.grey),
                     ),
+                    const SizedBox(height: 12),
+                    Text(
+                      serverStatus,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: serverReady
+                            ? Colors.green.shade700
+                            : Colors.grey,
+                      ),
+                    ),
+                    if (!serverReady && !discoveringServer)
+                      TextButton(
+                        onPressed: discoverServer,
+                        child: const Text('Retry server discovery'),
+                      ),
                     const SizedBox(height: 30),
                     TextField(
                       controller: usernameController,
@@ -164,7 +225,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       width: double.infinity,
                       height: 52,
                       child: FilledButton(
-                        onPressed: loading ? null : login,
+                        onPressed: loading || !serverReady ? null : login,
                         child: loading
                             ? const SizedBox(
                                 width: 24,
@@ -268,7 +329,6 @@ class _TableScreenState extends State<TableScreen> {
           builder: (_) => MenuScreen(
             tableId: tableId,
             tableNumber: tableNumber,
-            waiterId: (widget.user['id'] as num).toInt(),
             token: widget.token,
             isParcel: isParcel,
             existingOrder: activeOrder != null,
@@ -276,8 +336,9 @@ class _TableScreenState extends State<TableScreen> {
                 ? null
                 : (activeOrder['id'] as num).toInt(),
             existingOrderStatus: activeOrder?['status']?.toString(),
-            existingOrderTotal:
-                double.tryParse(activeOrder?['total']?.toString() ?? '0') ?? 0,
+            existingOrderTotalMinor: parseMinorUnits(
+              activeOrder?['total']?.toString() ?? '0',
+            ),
           ),
         ),
       );
@@ -468,25 +529,23 @@ class _TableScreenState extends State<TableScreen> {
 class MenuScreen extends StatefulWidget {
   final int tableId;
   final int tableNumber;
-  final int waiterId;
   final String token;
   final bool isParcel;
   final bool existingOrder;
   final int? existingOrderId;
   final String? existingOrderStatus;
-  final double existingOrderTotal;
+  final int existingOrderTotalMinor;
 
   const MenuScreen({
     super.key,
     required this.tableId,
     required this.tableNumber,
-    required this.waiterId,
     required this.token,
     required this.isParcel,
     required this.existingOrder,
     required this.existingOrderId,
     required this.existingOrderStatus,
-    required this.existingOrderTotal,
+    required this.existingOrderTotalMinor,
   });
 
   @override
@@ -561,8 +620,8 @@ class _MenuScreenState extends State<MenuScreen> {
     }
   }
 
-  double get selectedTotal {
-    double total = 0;
+  int get selectedTotalMinor {
+    var totalMinor = 0;
 
     for (final rawProduct in products) {
       final product = Map<String, dynamic>.from(rawProduct);
@@ -571,12 +630,11 @@ class _MenuScreenState extends State<MenuScreen> {
 
       final quantity = quantities[productId] ?? 0;
 
-      final price = double.tryParse(product['price'].toString()) ?? 0;
-
-      total += price * quantity;
+      final priceMinor = parseMinorUnits(product['price']);
+      totalMinor += priceMinor * quantity;
     }
 
-    return total;
+    return totalMinor;
   }
 
   List<Map<String, dynamic>> get selectedItems {
@@ -650,7 +708,7 @@ class _MenuScreenState extends State<MenuScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Order #$orderId sent to cashier · Total ₹${orderTotal.toStringAsFixed(2)}',
+            'Order #$orderId sent to cashier · Total ${formatMinorUnits(orderTotal)}',
           ),
           backgroundColor: Colors.green,
         ),
@@ -700,7 +758,6 @@ class _MenuScreenState extends State<MenuScreen> {
             )
           : await ApiService.createOrder(
               tableId: widget.tableId,
-              waiterId: widget.waiterId,
               items: items,
               token: widget.token,
             );
@@ -755,7 +812,7 @@ class _MenuScreenState extends State<MenuScreen> {
 
     final name = product['name']?.toString() ?? 'Unknown';
 
-    final price = double.tryParse(product['price'].toString()) ?? 0;
+    final price = parseMinorUnits(product['price']);
 
     final stock = (product['stock'] as num?)?.toInt() ?? 0;
 
@@ -782,7 +839,7 @@ class _MenuScreenState extends State<MenuScreen> {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                    '₹${price.toStringAsFixed(0)}',
+                    formatMinorUnits(price),
                     style: TextStyle(fontSize: 15, color: Colors.grey.shade700),
                   ),
                   const SizedBox(height: 3),
@@ -829,7 +886,7 @@ class _MenuScreenState extends State<MenuScreen> {
     );
   }
 
-  double get orderTotal => widget.existingOrderTotal + selectedTotal;
+  int get orderTotal => widget.existingOrderTotalMinor + selectedTotalMinor;
 
   @override
   Widget build(BuildContext context) {
@@ -869,7 +926,7 @@ class _MenuScreenState extends State<MenuScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Order total: ₹${orderTotal.toStringAsFixed(2)}',
+                      'Order total: ${formatMinorUnits(orderTotal)}',
                       style: const TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
@@ -906,7 +963,7 @@ class _MenuScreenState extends State<MenuScreen> {
                   child: RefreshIndicator(
                     onRefresh: loadProducts,
                     child: ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+                      padding: const EdgeInsets.all(16),
                       itemCount: products.length,
                       itemBuilder: (context, index) {
                         final product = Map<String, dynamic>.from(
@@ -943,7 +1000,7 @@ class _MenuScreenState extends State<MenuScreen> {
                             style: const TextStyle(fontSize: 12),
                           ),
                           Text(
-                            '₹${orderTotal.toStringAsFixed(2)}',
+                            formatMinorUnits(orderTotal),
                             style: const TextStyle(
                               fontSize: 22,
                               fontWeight: FontWeight.bold,

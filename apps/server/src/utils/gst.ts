@@ -1,3 +1,10 @@
+import {
+  fromMinorUnits,
+  roundRatioHalfUp,
+  toMinorUnits,
+  toRateBasisPoints,
+} from "./currency.js";
+
 export type GstAmounts = {
   subtotal: number;
   gstRate: number;
@@ -9,26 +16,42 @@ export type GstAmounts = {
   grandTotal: number;
 };
 
-const roundCurrency = (amount: number) =>
-  Math.round((amount + Number.EPSILON) * 100) / 100;
-
 export function calculateGstAmounts(
-  subtotal: number,
-  gstRate: number,
+  subtotal: number | string,
+  gstRate: number | string,
 ): GstAmounts {
-  const halfRate = gstRate / 2;
-  const cgstAmount = roundCurrency((subtotal * halfRate) / 100);
-  const sgstAmount = roundCurrency((subtotal * halfRate) / 100);
-  const gstAmount = roundCurrency(cgstAmount + sgstAmount);
+  let subtotalMinor: bigint;
+  let rateBasisPoints: bigint;
+  try {
+    subtotalMinor = toMinorUnits(subtotal, "Subtotal");
+    rateBasisPoints = toRateBasisPoints(gstRate, "GST rate");
+  } catch (error) {
+    throw new Error(
+      error instanceof Error && error.message.includes("GST rate")
+        ? "GST rate must be between 0 and 100 with at most 2 decimal places"
+        : error instanceof Error
+          ? error.message
+          : "Invalid GST amounts",
+    );
+  }
+
+  const gstMinor = roundRatioHalfUp(
+    subtotalMinor * rateBasisPoints,
+    10_000n,
+  );
+  const cgstMinor = (gstMinor + 1n) / 2n;
+  const sgstMinor = gstMinor / 2n;
+  const rate = Number(rateBasisPoints) / 100;
+  const cgstRate = rate / 2;
 
   return {
-    subtotal: roundCurrency(subtotal),
-    gstRate,
-    cgstRate: halfRate,
-    sgstRate: halfRate,
-    cgstAmount,
-    sgstAmount,
-    gstAmount,
-    grandTotal: roundCurrency(subtotal + gstAmount),
+    subtotal: fromMinorUnits(subtotalMinor),
+    gstRate: rate,
+    cgstRate,
+    sgstRate: cgstRate,
+    cgstAmount: fromMinorUnits(cgstMinor),
+    sgstAmount: fromMinorUnits(sgstMinor),
+    gstAmount: fromMinorUnits(gstMinor),
+    grandTotal: fromMinorUnits(subtotalMinor + gstMinor),
   };
 }

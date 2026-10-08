@@ -1,0 +1,5 @@
+ALTER TABLE "RestaurantSettings"
+ADD COLUMN "fssaiEnabled" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "fssaiNumber" TEXT NOT NULL DEFAULT '',
+ADD COLUMN "gstinEnabled" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "gstinNumber" TEXT NOT NULL DEFAULT '';

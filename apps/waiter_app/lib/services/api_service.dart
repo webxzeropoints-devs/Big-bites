@@ -1,13 +1,107 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
 class ApiService {
-  static const String baseUrl = String.fromEnvironment(
+  static const String _configuredBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://big-bites-server.onrender.com',
   );
+  static const int _discoveryPort = 3001;
+  static const String _discoveryRequest = 'BIGBITES_POS_DISCOVERY_V1';
+  static String baseUrl = _configuredBaseUrl;
+
+  static bool _isPrivateIPv4(String address) {
+    final ip = InternetAddress.tryParse(address);
+    if (ip == null || ip.type != InternetAddressType.IPv4) return false;
+    final octets = ip.rawAddress;
+    return octets[0] == 10 ||
+        (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
+        (octets[0] == 192 && octets[1] == 168);
+  }
+
+  static Future<String> discoverServer({
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (_configuredBaseUrl.isNotEmpty) {
+      baseUrl = _configuredBaseUrl;
+      await _checkHealth(baseUrl);
+      return baseUrl;
+    }
+
+    final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    final response = Completer<Map<String, dynamic>>();
+    socket.broadcastEnabled = true;
+    socket.listen((event) {
+      if (event != RawSocketEvent.read) return;
+
+      Datagram? datagram;
+      while ((datagram = socket.receive()) != null) {
+        try {
+          final payload = jsonDecode(utf8.decode(datagram!.data));
+          if (payload is Map<String, dynamic> &&
+              payload['service'] == 'big-bites-pos') {
+            final host = payload['host'];
+            if (host is String &&
+                payload['port'] == 3000 &&
+                _isPrivateIPv4(host) &&
+                !response.isCompleted) {
+              response.complete({'host': host, 'port': 3000});
+            }
+          }
+        } on FormatException {
+          continue;
+        }
+      }
+    });
+
+    try {
+      final broadcasts = <InternetAddress>{
+        InternetAddress('255.255.255.255'),
+      };
+      final message = utf8.encode(_discoveryRequest);
+      for (final broadcast in broadcasts) {
+        socket.send(message, broadcast, _discoveryPort);
+      }
+
+      final server = await response.future.timeout(timeout);
+      final discoveredUrl = 'http://${server['host']}:${server['port']}';
+      await _checkHealth(discoveredUrl);
+      baseUrl = discoveredUrl;
+      return baseUrl;
+    } on TimeoutException {
+      throw Exception(
+        'Could not discover a BIG BITES POS server on this Wi-Fi network. '
+        'Check that the POS PC is running and both devices use the same network.',
+      );
+    } finally {
+      socket.close();
+    }
+  }
+
+  static Future<void> _checkHealth(String url) async {
+    final response = await http
+        .get(Uri.parse('$url/health'))
+        .timeout(const Duration(seconds: 5));
+    dynamic data;
+    try {
+      data = jsonDecode(response.body);
+    } on FormatException {
+      throw Exception('The discovered server returned an invalid health response.');
+    }
+    if (response.statusCode != 200 ||
+        data is! Map ||
+        data['status'] != 'OK' ||
+        data['database'] != 'Connected') {
+      throw Exception(
+        data is Map && data['database'] == 'Disconnected'
+            ? 'The POS server was found, but its database is unavailable.'
+            : 'The discovered server did not pass its health check.',
+      );
+    }
+  }
 
   // ============================================================
   // LOGIN
@@ -155,7 +249,6 @@ class ApiService {
 
   static Future<Map<String, dynamic>> createOrder({
     required int tableId,
-    required int waiterId,
     required List<Map<String, dynamic>> items,
     required String token,
   }) async {
@@ -167,7 +260,6 @@ class ApiService {
       },
       body: jsonEncode({
         'tableId': tableId,
-        'waiterId': waiterId,
         'items': items,
       }),
     );

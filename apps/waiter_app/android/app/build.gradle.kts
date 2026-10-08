@@ -4,10 +4,26 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val waiterKeystorePath = providers.environmentVariable("WAITER_KEYSTORE_PATH").orNull
+val waiterKeystorePassword = providers.environmentVariable("WAITER_KEYSTORE_PASSWORD").orNull
+val waiterKeyAlias = providers.environmentVariable("WAITER_KEY_ALIAS").orNull
+val waiterKeyPassword = providers.environmentVariable("WAITER_KEY_PASSWORD").orNull
+
 android {
-    namespace = "com.example.waiter_app"
+    namespace = "com.bigbites.familyrestaurant.waiter"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
+
+    signingConfigs {
+        create("release") {
+            if (!waiterKeystorePath.isNullOrBlank()) {
+                storeFile = file(waiterKeystorePath)
+            }
+            storePassword = waiterKeystorePassword.orEmpty()
+            keyAlias = waiterKeyAlias.orEmpty()
+            keyPassword = waiterKeyPassword.orEmpty()
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -16,7 +32,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.waiter_app"
+        applicationId = "com.bigbites.familyrestaurant.waiter"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -31,9 +47,24 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "validateSigningRelease") {
+        doFirst {
+            check(
+                !waiterKeystorePath.isNullOrBlank() &&
+                    !waiterKeystorePassword.isNullOrBlank() &&
+                    !waiterKeyAlias.isNullOrBlank() &&
+                    !waiterKeyPassword.isNullOrBlank() &&
+                    file(waiterKeystorePath).isFile,
+            ) {
+                "Release signing is not configured. Set WAITER_KEYSTORE_PATH, " +
+                    "WAITER_KEYSTORE_PASSWORD, WAITER_KEY_ALIAS, and WAITER_KEY_PASSWORD."
+            }
         }
     }
 }

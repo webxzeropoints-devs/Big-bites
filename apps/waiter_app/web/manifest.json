@@ -1,6 +1,6 @@
 {
-    "name": "waiter_app",
-    "short_name": "waiter_app",
+    "name": "BB Waiter",
+    "short_name": "BB Waiter",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

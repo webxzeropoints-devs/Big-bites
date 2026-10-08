@@ -14,9 +14,11 @@ There is no Kitchen application in the final system.
 
 ## 2. Users
 
-- **Admin/Manager:** protected access to dashboard, products, tables, orders, payments, categories, and users APIs.
+- **Admin:** protected access to dashboard, products, tables, orders, payments, categories, and users APIs.
 - **Cashier:** uses the authenticated desktop billing screen.
 - **Waiter:** uses the Flutter application to create orders.
+
+Admins can create staff users with the Admin, Cashier, or Waiter role from User management.
 
 ## 3. Technology Stack
 
@@ -92,15 +94,15 @@ The existing schema and data were preserved. No database reset or destructive mi
 | GET/POST | `/api/admin/tables` | View/add tables |
 | GET/PATCH | `/api/admin/products` | View/update products |
 | GET/POST/PATCH | `/api/admin/categories` | Category management |
-| GET/PATCH | `/api/admin/users` | Safe user management |
+| GET/POST/PATCH | `/api/admin/users` | Safe user management |
 | GET | `/api/admin/orders` | Complete order history |
 | GET | `/api/admin/payments` | Payment history |
 
-Admin routes require a bearer token for an `ADMIN` or `MANAGER` user.
+Admin routes require a bearer token for an `ADMIN` user.
 
 ## 10. Authentication and Security
 
-Login returns a signed bearer token and a safe user object. Password fields are not returned by authentication, billing, orders, or admin responses. Order creation requires an authenticated WAITER token matching the waiter ID, billing requires ADMIN, MANAGER, or CASHIER, and admin routes enforce ADMIN or MANAGER roles. The current project uses plain stored passwords from the existing schema; password hashing should be added before production deployment.
+Login returns a signed bearer token and a safe user object. Passwords are stored as scrypt hashes; existing plaintext passwords are upgraded after a successful login. Password fields are not returned by authentication, billing, orders, or admin responses. Order creation requires an authenticated WAITER token matching the waiter ID, billing requires ADMIN or CASHIER, and admin routes enforce ADMIN roles. Configure `AUTH_SECRET` in the production environment; the server fails at startup if it is missing. Database seeding requires `SEED_ADMIN_PASSWORD`, `SEED_CASHIER_PASSWORD`, and `SEED_WAITER_PASSWORD`; provide them through environment configuration and never commit them.
 
 ## 11. Demonstration Scenario
 
@@ -124,6 +126,10 @@ cd C:\Users\vjsan\hotel-pos\apps\server
 npm install
 npm run dev
 ```
+
+Production requires `AUTH_SECRET`. When creating seeded staff accounts, configure
+`SEED_ADMIN_PASSWORD`, `SEED_CASHIER_PASSWORD`, and `SEED_WAITER_PASSWORD`
+without placing their values in source control.
 
 Production startup via `npm start` runs `prisma migrate deploy` before starting
 the server, so pending schema migrations are applied before API routes serve
@@ -165,7 +171,7 @@ before serving API requests.
 
 ## 13. Limitations and Future Enhancements
 
-The current system does not include a real payment gateway, receipt printer integration, or password hashing. Future work can add those features, backend integration tests, audit logging, reports, and richer product/category editing screens.
+The current system does not include a real payment gateway or receipt printer integration. Future work can add backend integration tests, audit logging, reports, and richer product/category editing screens.
 
 ## 14. Current Project Status
 
