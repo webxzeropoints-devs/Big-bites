@@ -5,7 +5,12 @@ const ORDER_SEQUENCE_LOCK_ID = 714203;
 export async function lockOrderSequence(
   tx: Prisma.TransactionClient,
 ): Promise<void> {
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(${ORDER_SEQUENCE_LOCK_ID})`;
+  await tx.$queryRaw`
+    WITH sequence_lock AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock(${ORDER_SEQUENCE_LOCK_ID})
+    )
+    SELECT 1 FROM sequence_lock
+  `;
 }
 
 export async function resetOrderSequenceIfEmpty(

@@ -7,6 +7,7 @@ process.env.AUTH_SECRET = "isolated-admin-order-test-secret";
 const { prisma } = require("../dist/config/database.js");
 const { createToken, optionalAuth } = require("../dist/middleware/auth.js");
 const adminRouter = require("../dist/routes/admin.js").default;
+const { lockOrderSequence } = require("../dist/utils/orderSequence.js");
 
 const adminToken = createToken({
   id: 1,
@@ -122,6 +123,19 @@ after(async () => {
         }),
     ),
   );
+});
+
+test("order sequence lock returns a Prisma-supported scalar", async () => {
+  let lockQuery;
+  await lockOrderSequence({
+    $queryRaw: async (query) => {
+      lockQuery = query.join("");
+      return [{ "?column?": 1 }];
+    },
+  });
+
+  assert.match(lockQuery, /WITH sequence_lock AS MATERIALIZED/);
+  assert.match(lockQuery, /SELECT 1 FROM sequence_lock/);
 });
 
 test("deleting an unpaid order returns its stock and clears table state transactionally", async () => {
