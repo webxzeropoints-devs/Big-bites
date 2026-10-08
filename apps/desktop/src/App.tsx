@@ -20,7 +20,8 @@ import {
 import "./App.css";
 
 const API_URL =
-  (import.meta.env.VITE_API_URL || "http://localhost:3000").replace(/\/$/, "");
+  ((import.meta.env.DEV && import.meta.env.VITE_API_URL) ||
+    "https://big-bites-server.onrender.com").replace(/\/$/, "");
 const RESTAURANT_NAME = "BIG BITES FAMILY RESTAURANT";
 const RECEIPT_RESTAURANT_NAME = "BIG BITES FAMILY\nRESTAURANT";
 type DiscountKind = "AMOUNT" | "PERCENTAGE";
@@ -323,7 +324,7 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
 
     if (!healthy) {
       setError(
-        "The POS server is not available on http://localhost:3000. Start the Big Bites backend service and retry.",
+        `The POS server is not available at ${API_URL}. Check the Big Bites backend service and retry.`,
       );
       setCheckingConnection(false);
       return false;
@@ -358,7 +359,7 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
     } catch (err) {
       const message =
         err instanceof Error && err.message === "Failed to fetch"
-          ? "The POS server is unavailable on http://localhost:3000. Please start the backend and retry."
+          ? `The POS server is unavailable at ${API_URL}. Please check the backend and retry.`
           : err instanceof Error
             ? err.message
             : "Login failed";

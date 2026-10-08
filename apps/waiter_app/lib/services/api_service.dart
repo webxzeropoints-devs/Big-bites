@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 class ApiService {
   static const String _configuredBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
+    defaultValue: 'https://big-bites-server.onrender.com',
   );
   static const int _discoveryPort = 3001;
   static const String _discoveryRequest = 'BIGBITES_POS_DISCOVERY_V1';
