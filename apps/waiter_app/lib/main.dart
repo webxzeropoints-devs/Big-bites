@@ -42,28 +42,28 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool loading = false;
   bool obscurePassword = true;
-  bool discoveringServer = true;
+  bool checkingBackend = true;
   bool serverReady = false;
-  String serverStatus = 'Searching for the POS server on this Wi-Fi...';
+  String serverStatus = 'Connecting to the BIG BITES server...';
 
   @override
   void initState() {
     super.initState();
-    discoverServer();
+    checkBackend();
   }
 
-  Future<void> discoverServer() async {
+  Future<void> checkBackend() async {
     setState(() {
-      discoveringServer = true;
+      checkingBackend = true;
       serverReady = false;
-      serverStatus = 'Searching for the POS server on this Wi-Fi...';
+      serverStatus = 'Connecting to the BIG BITES server...';
     });
     try {
-      final serverUrl = await ApiService.discoverServer();
+      final serverUrl = await ApiService.checkBackend();
       if (!mounted) return;
       setState(() {
         serverReady = true;
-        serverStatus = 'POS server ready at $serverUrl';
+        serverStatus = 'Connected to the BIG BITES server at $serverUrl';
       });
     } catch (error) {
       if (!mounted) return;
@@ -73,7 +73,7 @@ class _LoginScreenState extends State<LoginScreen> {
     } finally {
       if (mounted) {
         setState(() {
-          discoveringServer = false;
+          checkingBackend = false;
         });
       }
     }
@@ -83,7 +83,7 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!serverReady) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Wait for POS server discovery to finish'),
+          content: Text('Wait for the server connection check to finish'),
         ),
       );
       return;
@@ -183,10 +183,10 @@ class _LoginScreenState extends State<LoginScreen> {
                             : Colors.grey,
                       ),
                     ),
-                    if (!serverReady && !discoveringServer)
+                    if (!serverReady && !checkingBackend)
                       TextButton(
-                        onPressed: discoverServer,
-                        child: const Text('Retry server discovery'),
+                        onPressed: checkBackend,
+                        child: const Text('Retry connection'),
                       ),
                     const SizedBox(height: 30),
                     TextField(
