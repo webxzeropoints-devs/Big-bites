@@ -8,6 +8,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -22,22 +23,35 @@ import "./App.css";
 const API_URL =
   ((import.meta.env.DEV && import.meta.env.VITE_API_URL) ||
     "https://big-bites-server.onrender.com").replace(/\/$/, "");
+const ORDER_REPORTS_FOLDER_KEY = "big-bites-order-reports-folder";
 const RESTAURANT_NAME = "BIG BITES FAMILY RESTAURANT";
 const RECEIPT_RESTAURANT_NAME = "BIG BITES FAMILY\nRESTAURANT";
 type DiscountKind = "AMOUNT" | "PERCENTAGE";
+type ProductClassification = "VEG" | "NON_VEG" | "NOT_APPLICABLE";
+type OrderReportFile = { fileName: string; contentBase64: string };
 
 type Screen = "billing" | "admin" | "waiter";
 type UserRole = "ADMIN" | "CASHIER" | "WAITER";
 type User = { id: number; name: string; username: string; role: UserRole };
-type Category = { id: number; name: string; _count?: { products: number } };
+type Category = { id: number; name: string; sortOrder?: number; _count?: { products: number } };
+type ProductVariant = { id: number; name: string; price: number | string; isActive?: boolean };
 type Product = {
   id: number;
+  slug?: string;
   name: string;
+  description?: string;
+  subcategory?: string | null;
+  classification?: ProductClassification;
   price: number | string;
   stock: number;
+  stockUnit?: string;
+  lowStockThreshold?: number;
+  isVegetarian?: boolean;
+  isSignature?: boolean;
   isActive: boolean;
   categoryId: number;
   category?: { id: number; name: string };
+  variants?: ProductVariant[];
 };
 
 type Table = { id: number; number: number; status: string; isParcel?: boolean };
@@ -47,6 +61,7 @@ type OrderItem = {
   unitPrice: string | number;
   subtotal: string | number;
   product: { name: string };
+  variant?: { name: string } | null;
 };
 type Order = {
   id: number;
@@ -93,18 +108,61 @@ type Dashboard = {
   occupiedTables: number;
 };
 type OrderReportsSummary = {
-  folderPath: string;
-  folderAvailable: boolean;
-  folderError: string;
+  folderPath?: string;
   months: {
     month: string;
     fileName: string;
     orderCount: number;
     totalIncome: number;
-    fileExists: boolean;
-    exportedAt: string | null;
   }[];
 };
+
+async function syncFolderPathWithServer(token: string) {
+  try {
+    const summary = await request("/api/admin/order-reports", {}, token);
+    const serverPath = summary.folderPath?.trim() ?? "";
+    if (serverPath && !window.localStorage.getItem(ORDER_REPORTS_FOLDER_KEY)) {
+      window.localStorage.setItem(ORDER_REPORTS_FOLDER_KEY, serverPath);
+    }
+  } catch {
+  }
+}
+
+async function saveOrderReportFiles(
+  folderPath: string,
+  reports: OrderReportFile[],
+) {
+  if (!Array.isArray(reports)) {
+    throw new Error("The server returned an invalid monthly workbook response.");
+  }
+  if (reports.length === 0) return [];
+  if (!folderPath.trim()) {
+    throw new Error("Choose an Excel save location first.");
+  }
+  if (
+    reports.some(
+      (report) =>
+        typeof report.fileName !== "string" ||
+        typeof report.contentBase64 !== "string" ||
+        report.contentBase64.length === 0,
+    )
+  ) {
+    throw new Error("The server returned incomplete monthly workbook data.");
+  }
+
+  const savedFiles = await invoke<string[]>("save_order_reports", {
+    folderPath,
+    reports,
+  });
+  if (
+    !Array.isArray(savedFiles) ||
+    savedFiles.length !== reports.length ||
+    savedFiles.some((filePath) => typeof filePath !== "string" || !filePath)
+  ) {
+    throw new Error("The desktop could not verify every saved monthly workbook.");
+  }
+  return savedFiles;
+}
 
 const tableLabel = (table?: { number: number; isParcel?: boolean } | null) =>
   table ? (table.isParcel ? "Parcel" : `Table ${table.number}`) : "Table unavailable";
@@ -190,10 +248,14 @@ function calculateEnteredDiscount(
 }
 
 async function checkApiHealth() {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 8000);
+
   try {
     const response = await fetch(`${API_URL}/health`, {
       method: "GET",
       headers: { Accept: "application/json" },
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -204,6 +266,8 @@ async function checkApiHealth() {
     return data?.status === "OK" && data?.database === "Connected";
   } catch {
     return false;
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 
@@ -313,9 +377,9 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
     setError("");
     let healthy = false;
 
-    for (let attempt = 0; attempt < 15; attempt += 1) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       healthy = await checkApiHealth();
-      if (healthy || attempt === 14) {
+      if (healthy || attempt === 3) {
         break;
       }
 
@@ -491,9 +555,9 @@ function ReceiptPreview({
 
           <hr className="receipt-divider" />
 
-          <div className="receipt-tax-invoice">
-            {gstCharged ? "TAX INVOICE" : "GST: OFF"}
-          </div>
+          {gstCharged && (
+            <div className="receipt-tax-invoice">TAX INVOICE</div>
+          )}
           {order.fssaiEnabled && order.fssaiNumber?.trim() && (
             <div className="receipt-tax-id">FSSAI: {order.fssaiNumber}</div>
           )}
@@ -533,7 +597,9 @@ function ReceiptPreview({
             {items.map((item) => (
               <div key={item.id}>
                 <div className="receipt-row">
-                  <span className="receipt-item-name">{item.product.name}</span>
+                  <span className="receipt-item-name">
+                    {item.product.name}{item.variant ? ` - ${item.variant.name}` : ""}
+                  </span>
                   <span>{item.quantity}</span>
                   <span>{money(item.unitPrice)}</span>
                   <span>{money(item.subtotal)}</span>
@@ -838,6 +904,19 @@ function BillingScreen({
         },
         token,
       );
+      const reportFolder =
+        window.localStorage.getItem(ORDER_REPORTS_FOLDER_KEY) ?? "";
+      let reportExportError = result.orderReportError as string | undefined;
+      if (reportFolder && result.orderReportFiles?.length) {
+        try {
+          await saveOrderReportFiles(reportFolder, result.orderReportFiles);
+        } catch (reportError) {
+          reportExportError =
+            reportError instanceof Error
+              ? reportError.message
+              : "Unable to save the monthly Excel workbook to this device.";
+        }
+      }
 
       const paidOrder = {
         ...billWithAddress,
@@ -855,9 +934,9 @@ function BillingScreen({
       setShowPayment(false);
       setAmountReceived("");
       await load();
-      if (result.orderReportError) {
+      if (reportExportError) {
         setError(
-          `Payment completed, but the Excel order report could not be updated: ${result.orderReportError}`,
+          `Payment completed, but the Excel order report could not be updated: ${reportExportError}`,
         );
       }
       setPreview(paidOrder);
@@ -1017,7 +1096,9 @@ function BillingScreen({
                 {(Array.isArray(selected.items) ? selected.items : []).map((item) => (
                   <div className="bill-item" key={item.id}>
                     <div>
-                      <strong>{item.product.name}</strong>
+                      <strong>
+                        {item.product.name}{item.variant ? ` - ${item.variant.name}` : ""}
+                      </strong>
                       <span>
                         {item.quantity} × {money(item.unitPrice)}
                       </span>
@@ -1043,12 +1124,7 @@ function BillingScreen({
                       <strong>{money(orderAmounts(selected).sgstAmount)}</strong>
                     </div>
                   </>
-                ) : (
-                  <div className="bill-summary-row">
-                    <span>GST</span>
-                    <strong>OFF</strong>
-                  </div>
-                )}
+                ) : null}
                 {displayedDiscountAmount > 0 && (
                   <div className="bill-summary-row">
                     <span>
@@ -1129,7 +1205,13 @@ function BillingScreen({
               </div>}
 
               {selectedIsBillable && (!showPayment ? (
-                <button className="primary-btn full" onClick={() => setShowPayment(true)}>
+                <button
+                  className="primary-btn full"
+                  onClick={() => {
+                    setAmountReceived(paymentDue.toFixed(2));
+                    setShowPayment(true);
+                  }}
+                >
                   Proceed to payment
                 </button>
               ) : (
@@ -1144,7 +1226,12 @@ function BillingScreen({
                       <button
                         key={value}
                         className={method === value ? "method-btn active" : "method-btn"}
-                        onClick={() => setMethod(value)}
+                        onClick={() => {
+                          setMethod(value);
+                          if (value === "CASH" && !amountReceived.trim()) {
+                            setAmountReceived(paymentDue.toFixed(2));
+                          }
+                        }}
                       >
                         {value}
                       </button>
@@ -1247,7 +1334,7 @@ function BillingScreen({
   );
 }
 
-function AdminScreen({ token, role }: { token: string; role: string }) {
+function AdminScreen({ token, role }: { token: string; role: UserRole }) {
   const [activeTab, setActiveTab] = useState<"overview" | "products" | "tables" | "orders" | "payments" | "settings" | "reports" | "waiters" | "staff">("overview");
   const [dashboard, setDashboard] = useState<Dashboard>({
     openOrders: 0,
@@ -1270,12 +1357,15 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
   const [orderMessage, setOrderMessage] = useState("");
   const [waitersLoading, setWaitersLoading] = useState(false);
   const [error, setError] = useState("");
+  const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [tableModalOpen, setTableModalOpen] = useState(false);
   const [waiterModalOpen, setWaiterModalOpen] = useState(false);
   const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
   const [tableNumber, setTableNumber] = useState("");
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editingCategoryId, setEditingCategoryId] = useState<number | null>(null);
+  const [categoryName, setCategoryName] = useState("");
   const [editingWaiter, setEditingWaiter] = useState<User | null>(null);
   const [waiterForm, setWaiterForm] = useState({
     name: "",
@@ -1285,10 +1375,17 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
   });
   const [productForm, setProductForm] = useState({
     name: "",
+    description: "",
+    subcategory: "",
     categoryId: "",
     price: "",
     stock: "",
+    stockUnit: "pcs",
+    lowStockThreshold: "0",
+    classification: "VEG" as ProductClassification,
+    isSignature: false,
     isActive: true,
+    variantsText: "",
   });
   const [productQuery, setProductQuery] = useState("");
   const [gstRate, setGstRate] = useState("5");
@@ -1303,6 +1400,9 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
   const [settingsError, setSettingsError] = useState("");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [reportSummary, setReportSummary] = useState<OrderReportsSummary | null>(null);
+  const [reportFolderPath, setReportFolderPath] = useState(
+    () => window.localStorage.getItem(ORDER_REPORTS_FOLDER_KEY) ?? "",
+  );
   const [reportLoading, setReportLoading] = useState(false);
   const [reportLocationSaving, setReportLocationSaving] = useState(false);
   const [reportExporting, setReportExporting] = useState(false);
@@ -1380,32 +1480,25 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
     setReportLocationSaving(true);
     setReportMessage("");
     setReportError("");
-    let locationSaved = false;
     try {
-      await request(
-        "/api/admin/settings",
-        {
-          method: "PATCH",
-          body: JSON.stringify({ orderReportsPath: folderPath }),
-        },
-        token,
-      );
-      locationSaved = true;
-      await request(
+      window.localStorage.setItem(ORDER_REPORTS_FOLDER_KEY, folderPath);
+      setReportFolderPath(folderPath);
+      const result = await request(
         "/api/admin/order-reports/export",
         { method: "POST" },
         token,
       );
-      setReportMessage("Excel save location saved and monthly reports updated.");
+      const savedFiles = await saveOrderReportFiles(folderPath, result.reports);
+      setReportMessage(
+        result.reports.length
+          ? `Saved monthly workbook(s): ${savedFiles.join("; ")}`
+          : "Excel save location saved. No completed and paid orders are available to export yet.",
+      );
       await loadOrderReports();
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Unable to update order reports";
-      setReportError(
-        locationSaved
-          ? `The folder was saved, but monthly reports could not be updated: ${message}`
-          : `Unable to save the Excel folder: ${message}`,
-      );
+      setReportError(`The folder was selected, but Excel files could not be saved: ${message}`);
       await loadOrderReports();
     } finally {
       setReportLocationSaving(false);
@@ -1437,14 +1530,18 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
     setReportMessage("");
     setReportError("");
     try {
+      if (!reportFolderPath) {
+        throw new Error("Choose an Excel save location first.");
+      }
       const result = await request(
         "/api/admin/order-reports/export",
         { method: "POST" },
         token,
       );
+      const savedFiles = await saveOrderReportFiles(reportFolderPath, result.reports);
       setReportMessage(
         result.reports.length
-          ? `${result.reports.length} monthly workbook(s) updated.`
+          ? `Saved monthly workbook(s): ${savedFiles.join("; ")}`
           : "No completed and paid orders are available to export yet.",
       );
       await loadOrderReports();
@@ -1462,7 +1559,10 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
 
   useEffect(() => {
     if (activeTab === "settings") void loadGstSettings();
-    if (activeTab === "reports") void loadOrderReports();
+    if (activeTab === "reports") {
+      void syncFolderPathWithServer(token);
+      void loadOrderReports();
+    }
   }, [activeTab, token]);
 
   const saveGstRate = async (event: FormEvent) => {
@@ -1578,10 +1678,17 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
     setEditingProduct(null);
     setProductForm({
       name: "",
+      description: "",
+      subcategory: "",
       categoryId: categoryOptions[0]?.value ?? "",
       price: "",
       stock: "",
+      stockUnit: "pcs",
+      lowStockThreshold: "0",
+      classification: "VEG",
+      isSignature: false,
       isActive: true,
+      variantsText: "",
     });
     setProductModalOpen(true);
   };
@@ -1590,10 +1697,20 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
     setEditingProduct(product);
     setProductForm({
       name: product.name,
+      description: product.description ?? "",
+      subcategory: product.subcategory ?? "",
       categoryId: String(product.categoryId ?? product.category?.id ?? ""),
       price: String(product.price),
       stock: String(product.stock),
+      stockUnit: product.stockUnit ?? "pcs",
+      lowStockThreshold: String(product.lowStockThreshold ?? 0),
+      classification: product.classification ?? (product.isVegetarian === false ? "NON_VEG" : "VEG"),
+      isSignature: Boolean(product.isSignature),
       isActive: Boolean(product.isActive),
+      variantsText: (product.variants ?? [])
+        .filter((variant) => variant.isActive !== false)
+        .map((variant) => `${variant.name} - ${variant.price}`)
+        .join("\n"),
     });
     setProductModalOpen(true);
   };
@@ -1601,11 +1718,37 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
   const saveProduct = async (event: FormEvent) => {
     event.preventDefault();
 
+    let variants: { name: string; price: number }[];
+    try {
+      variants = productForm.variantsText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const separator = line.lastIndexOf("-");
+          if (separator <= 0) throw new Error(`Use "variant name - price" for: ${line}`);
+          const name = line.slice(0, separator).trim();
+          const price = Number(line.slice(separator + 1).trim());
+          if (!name || !Number.isFinite(price) || price < 0) {
+            throw new Error(`Enter a valid name and price for: ${line}`);
+          }
+          return { name, price };
+        });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid product variants");
+      return;
+    }
+
     const payload = {
       ...productForm,
       categoryId: Number(productForm.categoryId),
       price: Number(productForm.price),
       stock: Number(productForm.stock),
+      lowStockThreshold: Number(productForm.lowStockThreshold),
+      isVegetarian: productForm.classification === "VEG",
+      isSignature: Boolean(productForm.isSignature),
+      isActive: Boolean(productForm.isActive),
+      variants,
     };
 
     try {
@@ -1621,6 +1764,7 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
         }, token);
       }
 
+      setError("");
       setProductModalOpen(false);
       await load();
     } catch (err) {
@@ -1628,9 +1772,77 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
     }
   };
 
-  const deleteProduct = async (productId: number) => {
+  const saveCategory = async (event: FormEvent) => {
+    event.preventDefault();
+    const name = categoryName.trim();
+    if (!name) {
+      setError("Enter a category name.");
+      return;
+    }
     try {
-      await request(`/api/admin/products/${productId}`, { method: "DELETE" }, token);
+      await request(
+        editingCategoryId
+          ? `/api/admin/categories/${editingCategoryId}`
+          : "/api/admin/categories",
+        {
+          method: editingCategoryId ? "PATCH" : "POST",
+          body: JSON.stringify({ name }),
+        },
+        token,
+      );
+      setCategoryName("");
+      setEditingCategoryId(null);
+      setError("");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save category");
+    }
+  };
+
+  const adjustProductStock = async (product: Product, mode: "add" | "set") => {
+    const label = mode === "add" ? "Add stock for" : "Set stock for";
+    const value = window.prompt(
+      mode === "add"
+        ? `${label} ${product.name}. Enter a positive quantity to add.`
+        : `${label} ${product.name}. Enter the new total stock quantity.`,
+      mode === "add" ? "10" : String(product.stock),
+    );
+    if (value === null || value.trim() === "") return;
+    const quantity = Number(value);
+    if (!Number.isInteger(quantity) || (mode === "add" ? quantity <= 0 : quantity < 0)) {
+      setError(mode === "add" ? "Added stock must be a positive integer." : "New stock must be a non-negative integer.");
+      return;
+    }
+
+    try {
+      await request(
+        `/api/admin/products/${product.id}/stock`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(
+            mode === "add"
+              ? { quantity, reason: `Added stock for ${product.name}` }
+              : { newStock: quantity, reason: `Set stock for ${product.name}` },
+          ),
+        },
+        token,
+      );
+      setError("");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update stock");
+    }
+  };
+
+  const deleteProduct = async (product: Product) => {
+    const confirmed = window.confirm(
+      `Delete "${product.name}"? If this item has historical orders, it will be deactivated rather than permanently removed.`,
+    );
+    if (!confirmed) return;
+
+    try {
+      await request(`/api/admin/products/${product.id}`, { method: "DELETE" }, token);
+      setError("");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to delete product");
@@ -1646,15 +1858,11 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
       ? `Delete order #${order.id} and its payment record? This cannot be undone and sold stock will not be restored.`
       : `Delete unpaid order #${order.id}? Its items and pending payment record will be deleted, and its stock returned.`;
 
-    if (
-      role !== "ADMIN" ||
-      !window.confirm(confirmation)
-    ) {
-      return;
-    }
+    if (role !== "ADMIN" || !window.confirm(confirmation)) return;
 
     setError("");
     setOrderMessage("");
+    setDeletingOrderId(order.id);
     try {
       await request(
         `/api/admin/orders/${order.id}`,
@@ -1666,6 +1874,8 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to delete order");
+    } finally {
+      setDeletingOrderId(null);
     }
   };
 
@@ -1865,6 +2075,31 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                           <span>{order.status}</span>
                           <span>{money(orderAmounts(order).grandTotal)}</span>
                           <time>{new Date(order.createdAt).toLocaleString()}</time>
+                          {role === "ADMIN" && (
+                            <button
+                              type="button"
+                              className="order-delete-btn"
+                              onClick={() => void deleteOrder(order)}
+                              disabled={deletingOrderId === order.id}
+                              aria-label={`Delete order ${order.id}`}
+                              title="Delete order"
+                            >
+                              <svg
+                                aria-hidden="true"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M3 6h18" />
+                                <path d="M8 6V4h8v2" />
+                                <path d="m19 6-1 14H6L5 6" />
+                                <path d="M10 11v5M14 11v5" />
+                              </svg>
+                            </button>
+                          )}
                         </span>
                       </div>
                     ))}
@@ -1910,39 +2145,124 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleProducts.map((product) => (
-                      <tr key={product.id}>
-                        <td>
-                          <div className="product-name-cell">
-                            <div className="brand-circle small">FO</div>
-                            <div>
-                              <strong>{product.name}</strong>
+                    {visibleProducts.map((product) => {
+                      const isLowStock =
+                        Number(product.lowStockThreshold ?? 0) > 0 &&
+                        Number(product.stock ?? 0) <= Number(product.lowStockThreshold ?? 0);
+
+                      return (
+                        <tr key={product.id}>
+                          <td>
+                            <div className="product-name-cell">
+                              <div className="brand-circle small">FO</div>
+                              <div>
+                                <strong>{product.name}</strong>
+                                {product.isSignature && <div className="tiny-meta">Signature</div>}
+                                <div className="tiny-meta">
+                                  {product.classification === "NOT_APPLICABLE"
+                                    ? "Not Applicable"
+                                    : product.classification === "NON_VEG" || product.isVegetarian === false
+                                      ? "Non Vegetarian"
+                                      : "Vegetarian"}
+                                </div>
+                                {product.subcategory && <div className="tiny-meta">{product.subcategory}</div>}
+                                {product.variants?.filter((variant) => variant.isActive !== false).map((variant) => (
+                                  <div className="tiny-meta" key={variant.id}>
+                                    {variant.name}: {money(variant.price)}
+                                  </div>
+                                ))}
+                              </div>
                             </div>
-                          </div>
-                        </td>
-                        <td>{product.category?.name ?? product.categoryId}</td>
-                        <td>{money(product.price)}</td>
-                        <td>{product.stock}</td>
-                        <td>
-                          <span className={product.isActive ? "status-text success" : "status-text danger"}>
-                            {product.isActive ? "Active" : "Inactive"}
-                          </span>
-                        </td>
-                        <td>
-                          <div className="table-actions">
-                            <button className="secondary-btn small" onClick={() => openEditProduct(product)}>
-                              Edit
-                            </button>
-                            <button className="danger-btn small" onClick={() => void deleteProduct(product.id)}>
-                              Delete
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td>{product.category?.name ?? product.categoryId}</td>
+                          <td>{money(product.price)}</td>
+                          <td>
+                            <div>
+                              <strong>{product.stock}</strong>
+                              {product.stockUnit && <div className="tiny-meta">{product.stockUnit}</div>}
+                            </div>
+                          </td>
+                          <td>
+                            <div style={{ display: "grid", gap: 4 }}>
+                              <span className={product.isActive ? "status-text success" : "status-text danger"}>
+                                {product.isActive ? "Active" : "Inactive"}
+                              </span>
+                              {isLowStock && <span className="status-text danger">Low stock</span>}
+                            </div>
+                          </td>
+                          <td>
+                            <div className="table-actions">
+                              <button className="secondary-btn small" onClick={() => openEditProduct(product)}>
+                                Edit
+                              </button>
+                              <button className="secondary-btn small" onClick={() => void adjustProductStock(product, "add")}>
+                                + Stock
+                              </button>
+                              <button className="secondary-btn small" onClick={() => void adjustProductStock(product, "set")}>
+                                Set
+                              </button>
+                              <button className="danger-btn small" onClick={() => void deleteProduct(product)}>
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
+
+              <section className="panel">
+                <div className="panel-heading">
+                  <div>
+                    <div className="eyebrow">Menu organization</div>
+                    <h3>Categories</h3>
+                  </div>
+                </div>
+                <form className="page-actions" onSubmit={saveCategory}>
+                  <input
+                    value={categoryName}
+                    onChange={(event) => setCategoryName(event.target.value)}
+                    placeholder="Category name"
+                    aria-label="Category name"
+                    required
+                  />
+                  <button className="primary-btn" type="submit">
+                    {editingCategoryId ? "Save category" : "Add category"}
+                  </button>
+                  {editingCategoryId && (
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => {
+                        setEditingCategoryId(null);
+                        setCategoryName("");
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </form>
+                <div className="data-list">
+                  {categories.map((category) => (
+                    <div className="data-row" key={category.id}>
+                      <strong className="data-row-primary">{category.name}</strong>
+                      <span>{category._count?.products ?? 0} products</span>
+                      <button
+                        type="button"
+                        className="secondary-btn small"
+                        onClick={() => {
+                          setEditingCategoryId(category.id);
+                          setCategoryName(category.name);
+                        }}
+                      >
+                        Rename
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </section>
           )}
 
@@ -1983,9 +2303,7 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
               </div>
 
               {error && <div className="error-banner">{error}</div>}
-              {orderMessage && (
-                <div className="success-banner">{orderMessage}</div>
-              )}
+              {orderMessage && <div className="success-banner">{orderMessage}</div>}
               <div className="data-list">
                 {orders.map((order) => (
                   <div className="data-row order-data-row" key={order.id}>
@@ -1996,10 +2314,27 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                       <time>{new Date(order.createdAt).toLocaleString()}</time>
                       {role === "ADMIN" && (
                         <button
-                          className="danger-btn small"
+                          type="button"
+                          className="order-delete-btn"
                           onClick={() => void deleteOrder(order)}
+                          disabled={deletingOrderId === order.id}
+                          aria-label={`Delete order ${order.id}`}
+                          title="Delete order"
                         >
-                          Delete
+                          <svg
+                            aria-hidden="true"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M3 6h18" />
+                            <path d="M8 6V4h8v2" />
+                            <path d="m19 6-1 14H6L5 6" />
+                            <path d="M10 11v5M14 11v5" />
+                          </svg>
                         </button>
                       )}
                     </span>
@@ -2210,14 +2545,16 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
               </p>
               {reportError && <div className="error-banner">{reportError}</div>}
               {reportMessage && <div className="success-banner">{reportMessage}</div>}
-              {reportSummary && !reportSummary.folderAvailable && (
-                <div className="error-banner">{reportSummary.folderError}</div>
+              {!reportFolderPath && (
+                <div className="error-banner">
+                  Choose and save an Excel order-history folder on this device.
+                </div>
               )}
               <div className="report-location">
                 <div>
                   <span className="label">Excel save folder</span>
                   <strong className="report-folder-path">
-                    {reportSummary?.folderPath || "Not configured"}
+                    {reportFolderPath || "Not configured"}
                   </strong>
                 </div>
                 <button
@@ -2232,7 +2569,12 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                 <button
                   className="primary-btn"
                   onClick={() => void exportOrderReports()}
-                  disabled={reportLoading || reportLocationSaving || reportExporting}
+                  disabled={
+                    !reportFolderPath ||
+                    reportLoading ||
+                    reportLocationSaving ||
+                    reportExporting
+                  }
                 >
                   {reportExporting ? "Updating..." : "Update Monthly Workbooks"}
                 </button>
@@ -2246,10 +2588,7 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                       <strong className="data-row-primary">{month.fileName}</strong>
                       <span className="data-row-secondary">
                         {month.orderCount} paid order(s) · Monthly total income{" "}
-                        {money(month.totalIncome)} ·{" "}
-                        {month.fileExists
-                          ? `Updated ${month.exportedAt ? new Date(month.exportedAt).toLocaleString() : ""}`
-                          : "Workbook needs updating"}
+                        {money(month.totalIncome)}
                       </span>
                     </div>
                   ))}
@@ -2405,6 +2744,24 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                 />
               </label>
 
+              <label>
+                Description
+                <textarea
+                  value={productForm.description}
+                  onChange={(event) => setProductForm((current) => ({ ...current, description: event.target.value }))}
+                  rows={3}
+                />
+              </label>
+
+              <label>
+                Subcategory
+                <input
+                  value={productForm.subcategory}
+                  onChange={(event) => setProductForm((current) => ({ ...current, subcategory: event.target.value }))}
+                  placeholder="Optional menu section"
+                />
+              </label>
+
               <div className="two-col">
                 <label>
                   Category
@@ -2448,6 +2805,27 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                   />
                 </label>
 
+                <label>
+                  Stock unit
+                  <input
+                    value={productForm.stockUnit}
+                    onChange={(event) => setProductForm((current) => ({ ...current, stockUnit: event.target.value }))}
+                  />
+                </label>
+              </div>
+
+              <div className="two-col">
+                <label>
+                  Low-stock threshold
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={productForm.lowStockThreshold}
+                    onChange={(event) => setProductForm((current) => ({ ...current, lowStockThreshold: event.target.value }))}
+                  />
+                </label>
+
                 <div className="switch-row">
                   <span>Available</span>
                   <button
@@ -2459,6 +2837,45 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
                   </button>
                 </div>
               </div>
+
+              <div className="two-col">
+                <label>
+                  Classification
+                  <select
+                    value={productForm.classification}
+                    onChange={(event) => setProductForm((current) => ({
+                      ...current,
+                      classification: event.target.value === "NON_VEG" || event.target.value === "NOT_APPLICABLE"
+                        ? event.target.value
+                        : "VEG",
+                    }))}
+                  >
+                    <option value="VEG">Vegetarian</option>
+                    <option value="NON_VEG">Non Vegetarian</option>
+                    <option value="NOT_APPLICABLE">Not Applicable</option>
+                  </select>
+                </label>
+                <div className="switch-row">
+                  <span>Signature</span>
+                  <button
+                    type="button"
+                    className={productForm.isSignature ? "toggle-btn active" : "toggle-btn"}
+                    onClick={() => setProductForm((current) => ({ ...current, isSignature: !current.isSignature }))}
+                  >
+                    <span className="toggle-knob" />
+                  </button>
+                </div>
+              </div>
+
+              <label>
+                Variants and prices (one per line)
+                <textarea
+                  value={productForm.variantsText}
+                  onChange={(event) => setProductForm((current) => ({ ...current, variantsText: event.target.value }))}
+                  rows={5}
+                  placeholder={"Quarter - 130\nHalf - 250\nFull - 460"}
+                />
+              </label>
 
               <div className="modal-actions">
                 <button type="button" className="secondary-btn" onClick={() => setProductModalOpen(false)}>
@@ -2607,10 +3024,14 @@ function AdminScreen({ token, role }: { token: string; role: string }) {
 
 function WaiterModeScreen({ token }: { token: string }) {
   const [tables, setTables] = useState<Table[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<number | null>(null);
-  const [quantities, setQuantities] = useState<Record<number, number>>({});
+  const [quantities, setQuantities] = useState<Record<string, number>>({});
+  const [selectedVariants, setSelectedVariants] = useState<Record<number, number>>({});
+  const [menuCategoryId, setMenuCategoryId] = useState<number | null>(null);
+  const [menuSearch, setMenuSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
@@ -2628,13 +3049,25 @@ function WaiterModeScreen({ token }: { token: string }) {
     setError("");
 
     try {
-      const [tablesResponse, productsResponse] = await Promise.all([
+      const [tablesResponse, categoriesResponse, productsResponse] = await Promise.all([
         request("/api/tables", {}, token),
+        request("/api/products/categories", {}, token),
         request("/api/products", {}, token),
       ]);
 
       setTables(tablesResponse as Table[]);
+      setCategories(categoriesResponse as Category[]);
       setProducts(productsResponse as Product[]);
+      setSelectedVariants((current) => {
+        const next = { ...current };
+        for (const product of productsResponse as Product[]) {
+          if (!product.variants?.length) continue;
+          if (!product.variants.some((variant) => variant.id === next[product.id])) {
+            next[product.id] = product.variants[0].id;
+          }
+        }
+        return next;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load waiter console data");
     } finally {
@@ -2642,28 +3075,48 @@ function WaiterModeScreen({ token }: { token: string }) {
     }
   }
 
-  const orderedProducts = useMemo(() => {
-    return products.filter((product) => (quantities[product.id] ?? 0) > 0);
-  }, [products, quantities]);
+  const visibleMenuProducts = useMemo(() => {
+    const query = menuSearch.trim().toLocaleLowerCase();
+    return products.filter((product) => {
+      if (menuCategoryId !== null && product.categoryId !== menuCategoryId) return false;
+      if (!query) return true;
+      return [product.name, product.category?.name ?? "", product.subcategory ?? ""]
+        .join(" ")
+        .toLocaleLowerCase()
+        .includes(query);
+    });
+  }, [menuCategoryId, menuSearch, products]);
 
   const cartTotal = useMemo(() => {
-    return orderedProducts.reduce((sum, product) => {
-      const quantity = quantities[product.id] ?? 0;
-      const priceMinor = parseMinorUnits(product.price);
+    return Object.entries(quantities).reduce((sum, [key, quantity]) => {
+      const [rawProductId, rawVariantId] = key.split(":");
+      const productId = Number(rawProductId);
+      const variantId = Number(rawVariantId);
+      const product = products.find((item) => item.id === productId);
+      if (!product) return sum;
+      const variant = variantId
+        ? product.variants?.find((item) => item.id === variantId)
+        : undefined;
+      const priceMinor = parseMinorUnits(variant?.price ?? product.price);
       if (priceMinor === null) throw new Error(`Invalid price for ${product.name}`);
       return sum + priceMinor * BigInt(quantity);
     }, 0n);
-  }, [orderedProducts, quantities]);
+  }, [products, quantities]);
 
-  function updateQuantity(productId: number, delta: number) {
+  function updateQuantity(productId: number, variantId: number | null, delta: number, stock: number) {
     setSuccess("");
     setQuantities((current) => {
-      const nextQuantity = Math.max(0, (current[productId] ?? 0) + delta);
+      const key = `${productId}:${variantId ?? ""}`;
+      const totalProductQuantity = Object.entries(current)
+        .filter(([currentKey]) => currentKey.startsWith(`${productId}:`))
+        .reduce((sum, [, quantity]) => sum + quantity, 0);
+      if (delta > 0 && totalProductQuantity >= stock) return current;
+      const nextQuantity = Math.max(0, (current[key] ?? 0) + delta);
       if (nextQuantity === 0) {
-        const { [productId]: _removed, ...rest } = current;
+        const { [key]: _removed, ...rest } = current;
         return rest;
       }
-      return { ...current, [productId]: nextQuantity };
+      return { ...current, [key]: nextQuantity };
     });
   }
 
@@ -2689,10 +3142,14 @@ function WaiterModeScreen({ token }: { token: string }) {
 
     const items = Object.entries(quantities)
       .filter(([, quantity]) => quantity > 0)
-      .map(([productId, quantity]) => ({
-        productId: Number(productId),
-        quantity: Number(quantity),
-      }));
+      .map(([key, quantity]) => {
+        const [productId, variantId] = key.split(":").map(Number);
+        return {
+          productId,
+          ...(variantId ? { variantId } : {}),
+          quantity: Number(quantity),
+        };
+      });
 
     if (!items.length) {
       setError("Select at least one item before placing the order.");
@@ -2831,28 +3288,97 @@ function WaiterModeScreen({ token }: { token: string }) {
                   </span>
                 </div>
 
+                <label className="search-field compact">
+                  <span aria-hidden="true">⌕</span>
+                  <input
+                    value={menuSearch}
+                    onChange={(event) => setMenuSearch(event.target.value)}
+                    placeholder="Search menu..."
+                    aria-label="Search menu"
+                  />
+                </label>
+                <div className="card-actions" aria-label="Menu categories">
+                  <button
+                    type="button"
+                    className={menuCategoryId === null ? "secondary-btn small active" : "secondary-btn small"}
+                    onClick={() => setMenuCategoryId(null)}
+                  >
+                    All
+                  </button>
+                  {categories.map((category) => (
+                    <button
+                      type="button"
+                      key={category.id}
+                      className={menuCategoryId === category.id ? "secondary-btn small active" : "secondary-btn small"}
+                      onClick={() => setMenuCategoryId(category.id)}
+                    >
+                      {category.name}
+                    </button>
+                  ))}
+                </div>
+
                 <div className="bill-items">
-                  {products.map((product) => {
-                    const quantity = quantities[product.id] ?? 0;
+                  {visibleMenuProducts.map((product) => {
                     const stock = Number(product.stock ?? 0);
+                    const selectedVariantId = selectedVariants[product.id] ?? null;
+                    const selectedVariant = product.variants?.find(
+                      (variant) => variant.id === selectedVariantId,
+                    );
+                    const quantityKey = `${product.id}:${selectedVariantId ?? ""}`;
+                    const quantity = quantities[quantityKey] ?? 0;
+                    const totalQuantity = Object.entries(quantities)
+                      .filter(([key]) => key.startsWith(`${product.id}:`))
+                      .reduce((sum, [, count]) => sum + count, 0);
                     return (
                       <div className="bill-item" key={product.id}>
                         <div>
                           <strong>{product.name}</strong>
-                          <span>{money(product.price)} · Stock {stock}</span>
+                          {product.subcategory && <span>{product.subcategory}</span>}
+                          <span>
+                            {product.classification === "NOT_APPLICABLE"
+                              ? "Not Applicable"
+                              : product.classification === "NON_VEG" || product.isVegetarian === false
+                                ? "Non Vegetarian"
+                                : "Vegetarian"}
+                            {product.isSignature ? " · Signature" : ""}
+                          </span>
+                          {product.variants && product.variants.length > 0 && (
+                            <select
+                              aria-label={`${product.name} size`}
+                              value={selectedVariantId ?? ""}
+                              onChange={(event) => {
+                                const variantId = Number(event.target.value);
+                                if (product.variants?.some((variant) => variant.id === variantId)) {
+                                  setSelectedVariants((current) => ({ ...current, [product.id]: variantId }));
+                                }
+                              }}
+                            >
+                              {product.variants.map((variant) => (
+                                <option key={variant.id} value={variant.id}>
+                                  {variant.name} · {money(variant.price)}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                          <span>
+                            {money(selectedVariant?.price ?? product.price)} · Stock {stock}
+                          </span>
                         </div>
                         <div className="card-actions">
-                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, -1)} disabled={quantity === 0}>
+                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, selectedVariantId, -1, stock)} disabled={quantity === 0}>
                             −
                           </button>
                           <strong>{quantity}</strong>
-                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, 1)} disabled={quantity >= stock}>
+                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, selectedVariantId, 1, stock)} disabled={totalQuantity >= stock}>
                             +
                           </button>
                         </div>
                       </div>
                     );
                   })}
+                  {visibleMenuProducts.length === 0 && (
+                    <div className="empty-state"><h4>No menu items match this filter</h4></div>
+                  )}
                 </div>
 
                 <div className="bill-total-row">

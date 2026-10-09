@@ -6,9 +6,10 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 class ApiService {
+  static const String _defaultBaseUrl = 'http://localhost:3000';
   static const String _configuredBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://big-bites-server.onrender.com',
+    defaultValue: _defaultBaseUrl,
   );
   static const int _discoveryPort = 3001;
   static const String _discoveryRequest = 'BIGBITES_POS_DISCOVERY_V1';
@@ -28,8 +29,13 @@ class ApiService {
   }) async {
     if (_configuredBaseUrl.isNotEmpty) {
       baseUrl = _configuredBaseUrl;
-      await _checkHealth(baseUrl);
-      return baseUrl;
+      try {
+        await _checkHealth(baseUrl);
+        return baseUrl;
+      } catch (_) {
+        // Fall back to local network discovery when the default local endpoint
+        // is unavailable or when the app is running in a device/network setup.
+      }
     }
 
     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
@@ -59,9 +65,7 @@ class ApiService {
     });
 
     try {
-      final broadcasts = <InternetAddress>{
-        InternetAddress('255.255.255.255'),
-      };
+      final broadcasts = <InternetAddress>{InternetAddress('255.255.255.255')};
       final message = utf8.encode(_discoveryRequest);
       for (final broadcast in broadcasts) {
         socket.send(message, broadcast, _discoveryPort);
@@ -90,7 +94,9 @@ class ApiService {
     try {
       data = jsonDecode(response.body);
     } on FormatException {
-      throw Exception('The discovered server returned an invalid health response.');
+      throw Exception(
+        'The discovered server returned an invalid health response.',
+      );
     }
     if (response.statusCode != 200 ||
         data is! Map ||
@@ -166,6 +172,27 @@ class ApiService {
   // ============================================================
   // GET PRODUCTS
   // ============================================================
+
+  static Future<List<dynamic>> getCategories() async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/api/products/categories'),
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Failed to load menu categories '
+        '(status ${response.statusCode})',
+      );
+    }
+
+    final data = jsonDecode(response.body);
+    if (data is! List) {
+      throw Exception(
+        'The server returned an invalid menu categories response',
+      );
+    }
+    return data;
+  }
 
   static Future<List<dynamic>> getProducts() async {
     final response = await http.get(Uri.parse('$baseUrl/api/products'));
@@ -259,10 +286,7 @@ class ApiService {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $token',
       },
-      body: jsonEncode({
-        'tableId': tableId,
-        'items': items,
-      }),
+      body: jsonEncode({'tableId': tableId, 'items': items}),
     );
 
     dynamic decoded;

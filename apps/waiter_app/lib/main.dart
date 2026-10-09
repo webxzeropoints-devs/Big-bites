@@ -554,8 +554,12 @@ class MenuScreen extends StatefulWidget {
 
 class _MenuScreenState extends State<MenuScreen> {
   List<dynamic> products = [];
+  List<dynamic> categories = [];
 
-  final Map<int, int> quantities = {};
+  final Map<String, int> quantities = {};
+  final Map<int, int> selectedVariants = {};
+  final TextEditingController searchController = TextEditingController();
+  int? selectedCategoryId;
 
   bool loading = true;
   bool submitting = false;
@@ -576,12 +580,32 @@ class _MenuScreenState extends State<MenuScreen> {
         error = null;
       });
 
-      final data = await ApiService.getProducts();
+      final results = await Future.wait([
+        ApiService.getCategories(),
+        ApiService.getProducts(),
+      ]);
 
       if (!mounted) return;
 
       setState(() {
-        products = data;
+        categories = results[0];
+        products = results[1];
+        for (final rawProduct in products) {
+          final product = Map<String, dynamic>.from(rawProduct);
+          final variants = product['variants'];
+          if (variants is List && variants.isNotEmpty) {
+            final firstVariant = Map<String, dynamic>.from(variants.first);
+            final currentVariantId = selectedVariants[product['id']];
+            final variantIds = variants
+                .map((variant) => (variant['id'] as num).toInt())
+                .toList();
+            if (currentVariantId == null ||
+                !variantIds.contains(currentVariantId)) {
+              selectedVariants[(product['id'] as num).toInt()] =
+                  (firstVariant['id'] as num).toInt();
+            }
+          }
+        }
         loading = false;
       });
     } catch (e) {
@@ -594,28 +618,45 @@ class _MenuScreenState extends State<MenuScreen> {
     }
   }
 
-  void increaseQuantity(int productId, int stock) {
-    final current = quantities[productId] ?? 0;
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
 
-    if (current >= stock) {
+  String quantityKey(int productId, int? variantId) =>
+      '$productId:${variantId ?? ''}';
+
+  int productQuantity(int productId) {
+    return quantities.entries
+        .where((entry) => entry.key.startsWith('$productId:'))
+        .fold(0, (sum, entry) => sum + entry.value);
+  }
+
+  void increaseQuantity(int productId, int? variantId, int stock) {
+    final key = quantityKey(productId, variantId);
+    final current = quantities[key] ?? 0;
+
+    if (productQuantity(productId) >= stock) {
       return;
     }
 
     setState(() {
-      quantities[productId] = current + 1;
+      quantities[key] = current + 1;
     });
   }
 
-  void decreaseQuantity(int productId) {
-    final current = quantities[productId] ?? 0;
+  void decreaseQuantity(int productId, int? variantId) {
+    final key = quantityKey(productId, variantId);
+    final current = quantities[key] ?? 0;
 
     if (current <= 1) {
       setState(() {
-        quantities.remove(productId);
+        quantities.remove(key);
       });
     } else {
       setState(() {
-        quantities[productId] = current - 1;
+        quantities[key] = current - 1;
       });
     }
   }
@@ -623,15 +664,25 @@ class _MenuScreenState extends State<MenuScreen> {
   int get selectedTotalMinor {
     var totalMinor = 0;
 
-    for (final rawProduct in products) {
-      final product = Map<String, dynamic>.from(rawProduct);
-
-      final productId = (product['id'] as num).toInt();
-
-      final quantity = quantities[productId] ?? 0;
-
-      final priceMinor = parseMinorUnits(product['price']);
-      totalMinor += priceMinor * quantity;
+    for (final entry in quantities.entries) {
+      final keyParts = entry.key.split(':');
+      final productId = int.parse(keyParts.first);
+      final variantId = keyParts.length > 1 && keyParts[1].isNotEmpty
+          ? int.parse(keyParts[1])
+          : null;
+      final product = products
+          .map((rawProduct) => Map<String, dynamic>.from(rawProduct))
+          .firstWhere((item) => (item['id'] as num).toInt() == productId);
+      final variants = product['variants'] is List
+          ? product['variants'] as List
+          : const [];
+      final variant = variantId == null
+          ? null
+          : variants
+                .map((rawVariant) => Map<String, dynamic>.from(rawVariant))
+                .firstWhere((item) => (item['id'] as num).toInt() == variantId);
+      final priceMinor = parseMinorUnits(variant?['price'] ?? product['price']);
+      totalMinor += priceMinor * entry.value;
     }
 
     return totalMinor;
@@ -640,16 +691,18 @@ class _MenuScreenState extends State<MenuScreen> {
   List<Map<String, dynamic>> get selectedItems {
     final List<Map<String, dynamic>> items = [];
 
-    for (final rawProduct in products) {
-      final product = Map<String, dynamic>.from(rawProduct);
-
-      final productId = (product['id'] as num).toInt();
-
-      final quantity = quantities[productId] ?? 0;
-
-      if (quantity > 0) {
-        items.add({'productId': productId, 'quantity': quantity});
-      }
+    for (final entry in quantities.entries) {
+      if (entry.value <= 0) continue;
+      final parts = entry.key.split(':');
+      final productId = int.parse(parts.first);
+      final variantId = parts.length > 1 && parts[1].isNotEmpty
+          ? int.parse(parts[1])
+          : null;
+      items.add({
+        'productId': productId,
+        'variantId': variantId,
+        'quantity': entry.value,
+      });
     }
 
     return items;
@@ -812,11 +865,23 @@ class _MenuScreenState extends State<MenuScreen> {
 
     final name = product['name']?.toString() ?? 'Unknown';
 
-    final price = parseMinorUnits(product['price']);
-
     final stock = (product['stock'] as num?)?.toInt() ?? 0;
 
-    final quantity = quantities[productId] ?? 0;
+    final variants = product['variants'] is List
+        ? (product['variants'] as List)
+              .map((variant) => Map<String, dynamic>.from(variant))
+              .toList()
+        : <Map<String, dynamic>>[];
+    final selectedVariantId = selectedVariants[productId];
+    final selectedVariant = variants.where(
+      (variant) => (variant['id'] as num).toInt() == selectedVariantId,
+    );
+    final variant = selectedVariant.isEmpty ? null : selectedVariant.first;
+    final quantity = quantities[quantityKey(productId, selectedVariantId)] ?? 0;
+    final price = parseMinorUnits(variant?['price'] ?? product['price']);
+    final classification =
+        product['classification']?.toString() ??
+        (product['isVegetarian'] == true ? 'VEG' : 'NON_VEG');
 
     final isOutOfStock = stock <= 0;
 
@@ -837,6 +902,44 @@ class _MenuScreenState extends State<MenuScreen> {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  if (product['subcategory'] is String &&
+                      (product['subcategory'] as String).isNotEmpty)
+                    Text(
+                      product['subcategory'] as String,
+                      style: TextStyle(color: Colors.grey.shade600),
+                    ),
+                  Text(
+                    '${classification == 'NOT_APPLICABLE'
+                        ? 'Not Applicable'
+                        : classification == 'VEG'
+                        ? 'Vegetarian'
+                        : 'Non Vegetarian'}'
+                    '${product['isSignature'] == true ? ' · SIGNATURE' : ''}',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (variants.isNotEmpty)
+                    DropdownButton<int>(
+                      value: selectedVariantId,
+                      isExpanded: true,
+                      items: variants.map((variant) {
+                        final id = (variant['id'] as num).toInt();
+                        return DropdownMenuItem<int>(
+                          value: id,
+                          child: Text(
+                            '${variant['name']} · ${formatMinorUnits(parseMinorUnits(variant['price']))}',
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (variantId) {
+                        if (variantId == null) return;
+                        setState(() {
+                          selectedVariants[productId] = variantId;
+                        });
+                      },
+                    ),
                   const SizedBox(height: 5),
                   Text(
                     formatMinorUnits(price),
@@ -857,7 +960,7 @@ class _MenuScreenState extends State<MenuScreen> {
               children: [
                 IconButton(
                   onPressed: quantity > 0
-                      ? () => decreaseQuantity(productId)
+                      ? () => decreaseQuantity(productId, selectedVariantId)
                       : null,
                   icon: const Icon(Icons.remove_circle_outline),
                 ),
@@ -873,9 +976,13 @@ class _MenuScreenState extends State<MenuScreen> {
                   ),
                 ),
                 IconButton(
-                  onPressed: isOutOfStock || quantity >= stock
+                  onPressed: isOutOfStock || productQuantity(productId) >= stock
                       ? null
-                      : () => increaseQuantity(productId, stock),
+                      : () => increaseQuantity(
+                          productId,
+                          selectedVariantId,
+                          stock,
+                        ),
                   icon: const Icon(Icons.add_circle_outline),
                 ),
               ],
@@ -891,6 +998,23 @@ class _MenuScreenState extends State<MenuScreen> {
   @override
   Widget build(BuildContext context) {
     final title = widget.existingOrder ? 'Add More Food' : 'New Order';
+    final query = searchController.text.trim().toLowerCase();
+    final visibleProducts = products.where((rawProduct) {
+      final product = Map<String, dynamic>.from(rawProduct);
+      final category = Map<String, dynamic>.from(
+        product['category'] as Map? ?? const {},
+      );
+      if (selectedCategoryId != null &&
+          (category['id'] as num?)?.toInt() != selectedCategoryId) {
+        return false;
+      }
+      if (query.isEmpty) return true;
+      return [
+        product['name']?.toString() ?? '',
+        product['subcategory']?.toString() ?? '',
+        category['name']?.toString() ?? '',
+      ].join(' ').toLowerCase().contains(query);
+    }).toList();
     final orderSentToCashier =
         widget.existingOrder && widget.existingOrderStatus != 'CONFIRMED';
 
@@ -964,13 +1088,69 @@ class _MenuScreenState extends State<MenuScreen> {
                     onRefresh: loadProducts,
                     child: ListView.builder(
                       padding: const EdgeInsets.all(16),
-                      itemCount: products.length,
+                      itemCount: visibleProducts.length + 2,
                       itemBuilder: (context, index) {
-                        final product = Map<String, dynamic>.from(
-                          products[index],
+                        if (index == 0) {
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: TextField(
+                              controller: searchController,
+                              onChanged: (_) => setState(() {}),
+                              decoration: const InputDecoration(
+                                labelText: 'Search menu',
+                                prefixIcon: Icon(Icons.search),
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          );
+                        }
+                        if (index == 1) {
+                          return SizedBox(
+                            height: 48,
+                            child: ListView(
+                              scrollDirection: Axis.horizontal,
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: ChoiceChip(
+                                    label: const Text('All'),
+                                    selected: selectedCategoryId == null,
+                                    onSelected: (_) => setState(
+                                      () => selectedCategoryId = null,
+                                    ),
+                                  ),
+                                ),
+                                ...categories.map((rawCategory) {
+                                  final category = Map<String, dynamic>.from(
+                                    rawCategory,
+                                  );
+                                  final id = (category['id'] as num).toInt();
+                                  return Padding(
+                                    padding: const EdgeInsets.only(right: 8),
+                                    child: ChoiceChip(
+                                      label: Text(category['name'].toString()),
+                                      selected: selectedCategoryId == id,
+                                      onSelected: (_) => setState(
+                                        () => selectedCategoryId = id,
+                                      ),
+                                    ),
+                                  );
+                                }),
+                              ],
+                            ),
+                          );
+                        }
+                        if (visibleProducts.isEmpty) {
+                          return const Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Center(
+                              child: Text('No menu items match this filter'),
+                            ),
+                          );
+                        }
+                        return productCard(
+                          Map<String, dynamic>.from(visibleProducts[index - 2]),
                         );
-
-                        return productCard(product);
                       },
                     ),
                   ),

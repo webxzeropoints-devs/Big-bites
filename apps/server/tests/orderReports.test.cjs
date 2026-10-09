@@ -1,8 +1,5 @@
 const assert = require("node:assert/strict");
-const { mkdtemp, readFile, rm } = require("node:fs/promises");
-const os = require("node:os");
-const path = require("node:path");
-const { after, test } = require("node:test");
+const { test } = require("node:test");
 const ExcelJS = require("exceljs");
 
 const { prisma } = require("../dist/config/database.js");
@@ -75,25 +72,13 @@ const orders = [
   },
 ];
 
-let reportDirectory;
-
-async function readWorkbook(filePath) {
+async function readWorkbook(contentBase64) {
   const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(await readFile(filePath));
+  await workbook.xlsx.load(Buffer.from(contentBase64, "base64"));
   return workbook.worksheets[0];
 }
 
-after(async () => {
-  if (reportDirectory) {
-    await rm(reportDirectory, { recursive: true, force: true });
-  }
-});
-
-test("monthly export rebuilds paid orders once and recalculates income", async () => {
-  reportDirectory = await mkdtemp(path.join(os.tmpdir(), "big-bites-reports-"));
-  prisma.restaurantSettings.findUnique = async () => ({
-    orderReportsPath: reportDirectory,
-  });
+test("monthly export rebuilds paid orders and returns workbooks for local saving", async () => {
   prisma.order.findMany = async () => orders;
 
   const firstExport = await exportAllOrderReports();
@@ -104,10 +89,9 @@ test("monthly export rebuilds paid orders once and recalculates income", async (
   assert.equal(secondExport[0].fileName, "October 2026.xlsx");
   assert.equal(secondExport[0].orderCount, 2);
   assert.equal(secondExport[0].totalIncome, 31);
+  assert.equal(typeof secondExport[0].contentBase64, "string");
 
-  const sheet = await readWorkbook(
-    path.join(reportDirectory, "October 2026.xlsx"),
-  );
+  const sheet = await readWorkbook(secondExport[0].contentBase64);
   assert.equal(sheet.rowCount, 4);
   assert.deepEqual(
     [sheet.getCell("A2").value, sheet.getCell("A3").value],
@@ -120,19 +104,7 @@ test("monthly export rebuilds paid orders once and recalculates income", async (
   assert.equal(sheet.getCell("K4").value, 31);
 
   const summary = await getOrderReportSummary();
-  assert.equal(summary.folderAvailable, true);
+  assert.equal(summary.months.length, 1);
   assert.equal(summary.months[0].orderCount, 2);
   assert.equal(summary.months[0].totalIncome, 31);
-  assert.equal(summary.months[0].fileExists, true);
-});
-
-test("monthly export reports an unavailable selected folder", async () => {
-  prisma.restaurantSettings.findUnique = async () => ({
-    orderReportsPath: path.join(reportDirectory, "not-available"),
-  });
-
-  await assert.rejects(
-    exportAllOrderReports(),
-    /selected Excel save folder is unavailable or not writable/i,
-  );
 });

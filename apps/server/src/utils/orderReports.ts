@@ -1,7 +1,4 @@
 import ExcelJS from "exceljs";
-import { constants } from "node:fs";
-import { access, rename, stat, unlink } from "node:fs/promises";
-import path from "node:path";
 import { prisma } from "../config/database.js";
 import { toMinorUnits, fromMinorUnits } from "./currency.js";
 import { calculateOrderAmounts } from "./financial.js";
@@ -47,7 +44,7 @@ async function loadPaidOrders(month?: string) {
       },
     },
     include: {
-      items: { include: { product: true } },
+      items: { include: { product: true, variant: true } },
       table: true,
       waiter: { select: { name: true } },
       payment: true,
@@ -57,35 +54,6 @@ async function loadPaidOrders(month?: string) {
   return month
     ? orders.filter((order) => monthKey(paymentDate(order)) === month)
     : orders;
-}
-
-async function getSelectedDirectory() {
-  const settings = await prisma.restaurantSettings.findUnique({
-    where: { id: 1 },
-    select: { orderReportsPath: true },
-  });
-  const directory = settings?.orderReportsPath.trim();
-  if (!directory) {
-    throw new Error("Choose and save an Excel order-history folder in Admin settings.");
-  }
-
-  try {
-    const info = await stat(directory);
-    if (!info.isDirectory()) {
-      throw new Error("The selected Excel save location is not a folder.");
-    }
-    await access(directory, constants.W_OK);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("not a folder")) {
-      throw error;
-    }
-    throw new Error(
-      "The selected Excel save folder is unavailable or not writable. Choose an available folder in Admin settings.",
-      { cause: error },
-    );
-  }
-
-  return directory;
 }
 
 async function withMonthLock<T>(key: string, action: () => Promise<T>) {
@@ -108,7 +76,6 @@ async function withMonthLock<T>(key: string, action: () => Promise<T>) {
 }
 
 async function writeMonthWorkbook(key: string) {
-  const directory = await getSelectedDirectory();
   const orders = await loadPaidOrders(key);
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "BIG BITES POS";
@@ -156,7 +123,10 @@ async function writeMonthWorkbook(key: string) {
       paidAt,
       table: order.table.isParcel ? "Parcel" : `Table ${order.table.number}`,
       items: order.items
-        .map((item) => `${item.product.name} × ${item.quantity}`)
+        .map(
+          (item) =>
+            `${item.product.name}${item.variant ? ` - ${item.variant.name}` : ""} × ${item.quantity}`,
+        )
         .join(", "),
       subtotal: amounts.subtotal,
       discount: amounts.discountAmount,
@@ -181,36 +151,16 @@ async function writeMonthWorkbook(key: string) {
   totalRow.getCell(11).numFmt = currencyFormat;
 
   const fileName = monthFileName(key);
-  const filePath = path.join(directory, fileName);
-  const temporaryPath = path.join(
-    directory,
-    `.${fileName}.${process.pid}.${Date.now()}.tmp`,
+  const contentBase64 = Buffer.from(await workbook.xlsx.writeBuffer()).toString(
+    "base64",
   );
-
-  try {
-    await workbook.xlsx.writeFile(temporaryPath);
-    await rename(temporaryPath, filePath);
-  } catch (error) {
-    try {
-      await unlink(temporaryPath);
-    } catch (cleanupError) {
-      if (
-        !(cleanupError instanceof Error && "code" in cleanupError &&
-          cleanupError.code === "ENOENT")
-      ) {
-        console.error("Unable to remove temporary order report:", cleanupError);
-      }
-    }
-    throw new Error(`Unable to update ${fileName} in the selected folder.`, {
-      cause: error,
-    });
-  }
 
   return {
     month: key,
     fileName,
     orderCount: orders.length,
     totalIncome: fromMinorUnits(incomeMinor),
+    contentBase64,
   };
 }
 
@@ -255,7 +205,6 @@ export async function exportPaidOrderReports(orderIds: number[]) {
 }
 
 export async function exportAllOrderReports() {
-  await getSelectedDirectory();
   const orders = await loadPaidOrders();
   const months = [...new Set(orders.map((order) => monthKey(paymentDate(order))))].sort();
   const reports = [];
@@ -283,62 +232,24 @@ export async function getOrderReportSummary() {
     grouped.set(key, monthOrders);
   }
 
-  const directory = settings?.orderReportsPath.trim() ?? "";
-  let folderAvailable = false;
-  let folderError = "";
-  if (!directory) {
-    folderError = "Choose and save an Excel order-history folder in Admin settings.";
-  } else {
-    try {
-      const info = await stat(directory);
-      if (!info.isDirectory()) {
-        folderError = "The selected Excel save location is not a folder.";
-      } else {
-        await access(directory, constants.W_OK);
-        folderAvailable = true;
-      }
-    } catch {
-      folderError =
-        "The selected Excel save folder is unavailable or not writable.";
-    }
-  }
-
-  const months = await Promise.all(
-    [...grouped.entries()]
-      .sort(([left], [right]) => right.localeCompare(left))
-      .map(async ([key, monthOrders]) => {
-        const incomeMinor = monthOrders.reduce(
-          (sum, order) =>
-            sum + toMinorUnits(String(order.payment?.amount ?? 0)),
-          0n,
-        );
-        let fileExists = false;
-        let exportedAt: string | null = null;
-        if (folderAvailable) {
-          try {
-            const fileInfo = await stat(path.join(directory, monthFileName(key)));
-            fileExists = fileInfo.isFile();
-            exportedAt = fileExists ? fileInfo.mtime.toISOString() : null;
-          } catch {
-            fileExists = false;
-          }
-        }
-
-        return {
-          month: key,
-          fileName: monthFileName(key),
-          orderCount: monthOrders.length,
-          totalIncome: fromMinorUnits(incomeMinor),
-          fileExists,
-          exportedAt,
-        };
-      }),
-  );
+  const months = [...grouped.entries()]
+    .sort(([left], [right]) => right.localeCompare(left))
+    .map(([key, monthOrders]) => {
+      const incomeMinor = monthOrders.reduce(
+        (sum, order) =>
+          sum + toMinorUnits(String(order.payment?.amount ?? 0)),
+        0n,
+      );
+      return {
+        month: key,
+        fileName: monthFileName(key),
+        orderCount: monthOrders.length,
+        totalIncome: fromMinorUnits(incomeMinor),
+      };
+    });
 
   return {
-    folderPath: directory,
-    folderAvailable,
-    folderError,
+    folderPath: settings?.orderReportsPath.trim() ?? "",
     months,
   };
 }

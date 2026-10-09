@@ -30,6 +30,7 @@ const products = new Map([
   [41, { id: 41, name: "Test meal", price: 12.5, stock: 8, isActive: true }],
   [42, { id: 42, name: "Test drink", price: 3, stock: 6, isActive: true }],
 ]);
+const productVariants = new Map();
 let createdOrders;
 let nextOrderId;
 let orderSequenceResetCount;
@@ -41,6 +42,7 @@ function resetMockData() {
   });
   products.get(41).stock = 8;
   products.get(42).stock = 6;
+  productVariants.clear();
   createdOrders = [];
   nextOrderId = 5;
   orderSequenceResetCount = 0;
@@ -126,6 +128,13 @@ function installPrismaMocks() {
       },
       findUnique: async ({ where }) => products.get(where.id) ?? null,
     },
+    productVariant: {
+      findFirst: async ({ where }) =>
+        productVariants.get(where.id)?.productId === where.productId &&
+        productVariants.get(where.id)?.isActive
+          ? productVariants.get(where.id)
+          : null,
+    },
     restaurantTable: {
       update: async ({ where, data }) => {
         const table = tables.get(where.id);
@@ -142,6 +151,7 @@ function installPrismaMocks() {
   prisma.payment = transactionClient.payment;
   prisma.user.findUnique = async ({ where }) => users.get(where.id) ?? null;
   prisma.product.findUnique = async ({ where }) => products.get(where.id) ?? null;
+  prisma.productVariant = transactionClient.productVariant;
   prisma.$transaction = async (callback) => callback(transactionClient);
 }
 
@@ -220,6 +230,39 @@ test(`POST /api/orders persists a table order as the authenticated admin (${rout
   });
   assert.equal(duplicate.status, 409);
   assert.equal(createdOrders.length, 1);
+  assert.equal(products.get(41).stock, 6);
+});
+
+test(`POST /api/orders prices and records the selected product variant (${routePath})`, async () => {
+  resetMockData();
+  productVariants.set(501, {
+    id: 501,
+    productId: 41,
+    name: "Large",
+    price: 21.25,
+    isActive: true,
+  });
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+  const token = createToken({ id: 1, username: "admin", role: "ADMIN" });
+  const response = await requestOrder(baseUrl, {
+    token,
+    payload: {
+      tableId: 1,
+      items: [{ productId: 41, variantId: 501, quantity: 2 }],
+    },
+  });
+
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.order.total, "42.50");
+  assert.deepEqual(body.order.items[0], {
+    productId: 41,
+    variantId: 501,
+    quantity: 2,
+    unitPrice: "21.25",
+    subtotal: "42.50",
+  });
   assert.equal(products.get(41).stock, 6);
 });
 

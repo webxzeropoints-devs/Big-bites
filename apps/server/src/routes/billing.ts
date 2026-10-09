@@ -80,6 +80,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,
@@ -163,6 +164,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,
@@ -243,6 +245,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,
@@ -608,7 +611,7 @@ router.post(
             gstEnabled: billableOrder.gstEnabled,
           },
           include: {
-            items: { include: { product: true } },
+            items: { include: { product: true, variant: true } },
             table: true,
             waiter: {
               select: {
@@ -648,8 +651,11 @@ router.post(
       const totalMinor = toMinorUnits(result.grandTotal);
       const received = receivedMinor ?? totalMinor;
       let orderReportError: string | undefined;
+      let orderReportFiles:
+        | Awaited<ReturnType<typeof exportPaidOrderReport>>
+        | undefined;
       try {
-        await exportPaidOrderReport(result.order.id);
+        orderReportFiles = await exportPaidOrderReport(result.order.id);
       } catch (error) {
         console.error("Paid order report export failed:", {
           orderId: result.order.id,
@@ -672,6 +678,7 @@ router.post(
           method === "CASH"
             ? fromMinorUnits(received - totalMinor)
             : null,
+        ...(orderReportFiles ? { orderReportFiles } : {}),
         ...(orderReportError ? { orderReportError } : {}),
       });
     } catch (error) {
@@ -735,6 +742,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           waiter: {
@@ -1045,8 +1053,11 @@ router.post(
           ? received - result.totalMinor
           : 0n;
       let orderReportErrors: string[] = [];
+      let orderReportFiles:
+        | Awaited<ReturnType<typeof exportPaidOrderReports>>
+        | undefined;
       try {
-        await exportPaidOrderReports(
+        orderReportFiles = await exportPaidOrderReports(
           result.orders.map((order) => order.id),
         );
       } catch (error) {
@@ -1092,6 +1103,7 @@ router.post(
         method,
 
         payments: result.payments,
+        ...(orderReportFiles ? { orderReportFiles } : {}),
         ...(orderReportErrors.length > 0 ? { orderReportErrors } : {}),
       });
     } catch (error) {

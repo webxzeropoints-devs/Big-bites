@@ -1,6 +1,6 @@
 import { Router } from "express";
 import path from "node:path";
-import { Prisma } from "@prisma/client";
+import { Prisma, ProductClassification } from "@prisma/client";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
 import { calculateOrderAmounts, sumOrderAmounts } from "../utils/financial.js";
@@ -24,6 +24,30 @@ const admin = requireRoles("ADMIN");
 const safeUser = { id: true, name: true, username: true, role: true, createdAt: true, updatedAt: true };
 const id = (value: unknown) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const text = (value: unknown) => typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+const slugify = (value: string) => value.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+function parseVariants(value: unknown) {
+  if (!Array.isArray(value)) return null;
+  const variants: { name: string; price: string }[] = [];
+  const names = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== "object") return null;
+    const name = text((item as { name?: unknown }).name);
+    const rawPrice = (item as { price?: unknown }).price;
+    if (typeof rawPrice !== "number" && typeof rawPrice !== "string") return null;
+    if (!name || names.has(name.toLocaleLowerCase())) return null;
+    try {
+      const price = toDecimalString(
+        toMinorUnits(rawPrice, `Price for ${name}`),
+      );
+      names.add(name.toLocaleLowerCase());
+      variants.push({ name, price });
+    } catch {
+      return null;
+    }
+  }
+  return variants;
+}
 
 router.use(admin);
 
@@ -343,15 +367,58 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
-router.get("/categories", async (_req, res) => res.json(await prisma.category.findMany({ include: { _count: { select: { products: true } } }, orderBy: { name: "asc" } })));
+router.get("/categories", async (_req, res) => res.json(await prisma.category.findMany({ include: { _count: { select: { products: true } } }, orderBy: [{ sortOrder: "asc" }, { name: "asc" }] })));
 router.post("/categories", async (req, res) => { const name = text(req.body.name); if (!name) return res.status(400).json({ message: "Category name is required" }); try { res.status(201).json(await prisma.category.create({ data: { name } })); } catch { res.status(409).json({ message: "Category already exists" }); } });
 router.patch("/categories/:id", async (req, res) => { const categoryId = id(req.params.id), name = text(req.body.name); if (!categoryId || !name) return res.status(400).json({ message: "Valid category ID and name are required" }); try { res.json(await prisma.category.update({ where: { id: categoryId }, data: { name } })); } catch { res.status(404).json({ message: "Category not found" }); } });
 
-router.get("/products", async (_req, res) => res.json(await prisma.product.findMany({ include: { category: true }, orderBy: { name: "asc" } })));
+router.get("/products", async (_req, res) => {
+  try {
+    const products = await prisma.product.findMany({
+      include: { category: true, variants: { orderBy: { id: "asc" } } },
+      orderBy: [{ category: { sortOrder: "asc" } }, { name: "asc" }],
+    });
+
+    return res.json(
+      products.map((product) => ({
+        ...product,
+        price: Number(product.price),
+        stock: Number(product.stock),
+        lowStockThreshold: Number(product.lowStockThreshold ?? 0),
+        isVegetarian: Boolean(product.isVegetarian),
+        isSignature: Boolean(product.isSignature),
+        variants: product.variants.map((variant) => ({
+          ...variant,
+          price: Number(variant.price),
+        })),
+      })),
+    );
+  } catch (error) {
+    console.error("List products error:", error);
+    return res.status(500).json({ message: "Unable to load menu" });
+  }
+});
 router.post("/products", async (req, res) => {
   const name = text(req.body.name);
   const categoryId = id(req.body.categoryId);
+  const description = typeof req.body.description === "string" ? req.body.description.trim() : "";
+  const stockUnit = typeof req.body.stockUnit === "string" && req.body.stockUnit.trim() ? req.body.stockUnit.trim() : "pcs";
   const stock = Number(req.body.stock ?? 0);
+  const lowStockThreshold = Number(req.body.lowStockThreshold ?? 0);
+  const isVegetarian = req.body.isVegetarian !== undefined ? Boolean(req.body.isVegetarian) : true;
+  const isSignature = Boolean(req.body.isSignature);
+  const isActive = req.body.isActive !== undefined ? Boolean(req.body.isActive) : true;
+  const validClassifications = Object.values(ProductClassification);
+  const classification = req.body.classification === undefined
+    ? (isVegetarian ? ProductClassification.VEG : ProductClassification.NON_VEG)
+    : req.body.classification;
+  if (!validClassifications.includes(classification)) {
+    return res.status(400).json({ message: "Invalid product classification" });
+  }
+  const subcategory = typeof req.body.subcategory === "string" ? req.body.subcategory.trim() || null : null;
+  const variants = req.body.variants === undefined ? [] : parseVariants(req.body.variants);
+  if (variants === null) {
+    return res.status(400).json({ message: "Variants must have unique names and valid prices" });
+  }
   let price: string;
   try {
     price = toDecimalString(toMinorUnits(req.body.price, "Price"));
@@ -360,18 +427,46 @@ router.post("/products", async (req, res) => {
       message: "Price must be a non-negative amount with at most 2 decimal places",
     });
   }
-  if (!name || !categoryId || !Number.isInteger(stock) || stock < 0) {
+  if (!name || !categoryId || !Number.isInteger(stock) || stock < 0 || !Number.isInteger(lowStockThreshold) || lowStockThreshold < 0) {
     return res.status(400).json({
-      message: "Valid name, categoryId, price and stock are required",
+      message: "Valid name, category, price, stock, and low-stock threshold are required",
     });
   }
+  const category = await prisma.category.findUnique({ where: { id: categoryId } });
+  if (!category) {
+    return res.status(404).json({ message: "Category not found" });
+  }
   try {
-    return res.status(201).json(
-      await prisma.product.create({
-        data: { name, categoryId, price, stock },
-        include: { category: true },
-      }),
-    );
+    const product = await prisma.product.create({
+      data: {
+        name,
+        slug: `${slugify(category.name)}-${slugify(name)}`,
+        description,
+        categoryId,
+        price,
+        stock,
+        stockUnit,
+        lowStockThreshold,
+        isVegetarian: classification === ProductClassification.VEG,
+        classification,
+        subcategory,
+        isSignature,
+        isActive,
+        lastStockUpdatedAt: new Date(),
+        variants: { create: variants },
+      },
+      include: { category: true, variants: { where: { isActive: true }, orderBy: { id: "asc" } } },
+    });
+    return res.status(201).json({
+      ...product,
+      price: Number(product.price),
+      stock: Number(product.stock),
+      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
+      variants: product.variants.map((variant) => ({
+        ...variant,
+        price: Number(variant.price),
+      })),
+    });
   } catch (error) {
     console.error("Create product error:", error);
     return res.status(400).json({ message: "Unable to create product" });
@@ -382,15 +477,26 @@ router.patch("/products/:id", async (req, res) => {
   if (!productId) return res.status(400).json({ message: "Invalid product ID" });
   const data: {
     name?: string;
+    description?: string;
     categoryId?: number;
     price?: string;
     stock?: number;
+    stockUnit?: string;
+    lowStockThreshold?: number;
+    isVegetarian?: boolean;
+    classification?: ProductClassification;
+    subcategory?: string | null;
+    isSignature?: boolean;
     isActive?: boolean;
+    lastStockUpdatedAt?: Date;
   } = {};
   if (req.body.name !== undefined) {
     const name = text(req.body.name);
     if (!name) return res.status(400).json({ message: "A valid product name is required" });
     data.name = name;
+  }
+  if (req.body.description !== undefined) {
+    data.description = typeof req.body.description === "string" ? req.body.description.trim() : "";
   }
   if (req.body.categoryId !== undefined) {
     const categoryId = id(req.body.categoryId);
@@ -412,22 +518,155 @@ router.patch("/products/:id", async (req, res) => {
       return res.status(400).json({ message: "Stock must be a non-negative integer" });
     }
     data.stock = stock;
+    data.lastStockUpdatedAt = new Date();
   }
+  if (typeof req.body.stockUnit === "string" && req.body.stockUnit.trim()) { data.stockUnit = req.body.stockUnit.trim(); }
+  if (req.body.lowStockThreshold !== undefined) {
+    const lowStockThreshold = Number(req.body.lowStockThreshold);
+    if (!Number.isInteger(lowStockThreshold) || lowStockThreshold < 0) {
+      return res.status(400).json({ message: "Low-stock threshold must be a non-negative integer" });
+    }
+    data.lowStockThreshold = lowStockThreshold;
+  }
+  if (req.body.classification !== undefined) {
+    if (!Object.values(ProductClassification).includes(req.body.classification)) {
+      return res.status(400).json({ message: "Invalid product classification" });
+    }
+    data.classification = req.body.classification;
+    data.isVegetarian = req.body.classification === ProductClassification.VEG;
+  } else if (typeof req.body.isVegetarian === "boolean") {
+    data.isVegetarian = req.body.isVegetarian;
+    data.classification = req.body.isVegetarian
+      ? ProductClassification.VEG
+      : ProductClassification.NON_VEG;
+  }
+  if (req.body.subcategory !== undefined) {
+    if (req.body.subcategory !== null && typeof req.body.subcategory !== "string") {
+      return res.status(400).json({ message: "Subcategory must be text" });
+    }
+    data.subcategory = typeof req.body.subcategory === "string"
+      ? req.body.subcategory.trim() || null
+      : null;
+  }
+  if (typeof req.body.isSignature === "boolean") data.isSignature = req.body.isSignature;
   if (typeof req.body.isActive === "boolean") data.isActive = req.body.isActive;
-  if (!Object.keys(data).length) {
+  const variants = req.body.variants === undefined ? undefined : parseVariants(req.body.variants);
+  if (variants === null) {
+    return res.status(400).json({ message: "Variants must have unique names and valid prices" });
+  }
+  if (!Object.keys(data).length && variants === undefined) {
     return res.status(400).json({ message: "No valid changes" });
   }
   try {
-    return res.json(
-      await prisma.product.update({
+    const product = await prisma.$transaction(async (tx) => {
+      await tx.product.update({
         where: { id: productId },
         data,
-        include: { category: true },
-      }),
-    );
+      });
+      if (variants !== undefined) {
+        for (const variant of variants) {
+          await tx.productVariant.upsert({
+            where: {
+              productId_name: { productId, name: variant.name },
+            },
+            update: { price: variant.price, isActive: true },
+            create: { productId, ...variant },
+          });
+        }
+        await tx.productVariant.updateMany({
+          where: {
+            productId,
+            ...(variants.length
+              ? { name: { notIn: variants.map((variant) => variant.name) } }
+              : {}),
+          },
+          data: { isActive: false },
+        });
+      }
+      return tx.product.findUniqueOrThrow({
+        where: { id: productId },
+        include: { category: true, variants: { orderBy: { id: "asc" } } },
+      });
+    });
+    return res.json({
+      ...product,
+      price: Number(product.price),
+      stock: Number(product.stock),
+      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
+      variants: product.variants.map((variant) => ({
+        ...variant,
+        price: Number(variant.price),
+      })),
+    });
   } catch (error) {
     console.error("Update product error:", error);
     return res.status(404).json({ message: "Product or category not found" });
+  }
+});
+router.patch("/products/:id/stock", async (req, res) => {
+  const productId = id(req.params.id);
+  if (!productId) return res.status(400).json({ message: "Invalid product ID" });
+  const reason = typeof req.body.reason === "string" ? req.body.reason.trim() : "Manual stock update";
+
+  const nextStock = Number(req.body.newStock ?? req.body.quantity ?? 0);
+  const delta = Number(req.body.quantity ?? 0);
+  const isAdjustment = req.body.newStock !== undefined;
+
+  if (isAdjustment) {
+    if (!Number.isInteger(nextStock) || nextStock < 0) {
+      return res.status(400).json({ message: "New stock quantity must be a non-negative integer" });
+    }
+  } else {
+    if (!Number.isInteger(delta) || delta <= 0) {
+      return res.status(400).json({ message: "Added stock quantity must be a positive integer" });
+    }
+  }
+
+  try {
+    const product = await prisma.$transaction(async (tx) => {
+      const current = await tx.product.findUnique({ where: { id: productId } });
+      if (!current) {
+        throw new Error("PRODUCT_NOT_FOUND");
+      }
+      const previousStock = current.stock;
+      const newQuantity = isAdjustment ? nextStock : previousStock + delta;
+      if (newQuantity < 0) {
+        throw new Error("Invalid stock update");
+      }
+      const updated = await tx.product.update({
+        where: { id: productId },
+        data: {
+          stock: newQuantity,
+          isActive: newQuantity > 0 || current.isActive,
+          lastStockUpdatedAt: new Date(),
+        },
+        include: { category: true },
+      });
+      await tx.productStockMovement.create({
+        data: {
+          productId,
+          movementType: isAdjustment ? "ADJUSTMENT" : "RESTOCK",
+          quantity: isAdjustment ? newQuantity - previousStock : delta,
+          previousStock,
+          newStock: newQuantity,
+          reason: reason || (isAdjustment ? "Manual stock adjustment" : "Stock added"),
+        },
+      });
+      return updated;
+    });
+
+    return res.json({
+      ...product,
+      price: Number(product.price),
+      stock: Number(product.stock),
+      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "PRODUCT_NOT_FOUND") {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    console.error("Stock update error:", error);
+    return res.status(400).json({ message: "Unable to update stock" });
   }
 });
 router.delete("/products/:id", async (req, res) => {
@@ -435,13 +674,34 @@ router.delete("/products/:id", async (req, res) => {
   if (!productId) return res.status(400).json({ message: "Invalid product ID" });
 
   try {
+    const existing = await prisma.product.findUnique({
+      where: { id: productId },
+      include: { orderItems: { select: { id: true } } },
+    });
+    if (!existing) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    if (existing.orderItems.length > 0) {
+      const deactivated = await prisma.product.update({
+        where: { id: productId },
+        data: {
+          isActive: false,
+          stock: 0,
+          lowStockThreshold: 0,
+        },
+      });
+      return res.status(200).json({
+        message: "This product is still referenced by historical orders, so it was deactivated instead of permanently deleted.",
+        product: deactivated,
+      });
+    }
+
     await prisma.product.delete({ where: { id: productId } });
-    res.status(204).send();
+    return res.status(204).send();
   } catch (error) {
-    const message = error instanceof Error && /foreign key|constraint|P2025/i.test(error.message)
-      ? "This product is still in use and cannot be deleted."
-      : "Product not found";
-    res.status(400).json({ message });
+    console.error("Delete product error:", error);
+    return res.status(400).json({ message: "Unable to delete product" });
   }
 });
 
@@ -452,7 +712,7 @@ router.patch("/tables/:id", async (req, res) => { const tableId = id(req.params.
 router.get("/orders", async (_req, res) => {
   const orders = await prisma.order.findMany({
     include: {
-      items: { include: { product: true } },
+      items: { include: { product: true, variant: true } },
       table: true,
       waiter: { select: safeUser },
       payment: true,

@@ -84,7 +84,10 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
       });
     }
 
-    const productQuantities = new Map<number, number>();
+    const productQuantities = new Map<
+      string,
+      { productId: number; variantId: number | null; quantity: number }
+    >();
 
     for (const item of items) {
       if (!item || typeof item !== "object") {
@@ -94,11 +97,17 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
       }
 
       const productId = Number(item.productId);
+      const variantId =
+        item.variantId === undefined || item.variantId === null
+          ? null
+          : Number(item.variantId);
       const quantity = Number(item.quantity);
 
       if (
         !Number.isInteger(productId) ||
         productId <= 0 ||
+        (variantId !== null &&
+          (!Number.isInteger(variantId) || variantId <= 0)) ||
         !Number.isInteger(quantity) ||
         quantity <= 0
       ) {
@@ -107,21 +116,25 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
         });
       }
 
-      productQuantities.set(
+      const key = `${productId}:${variantId ?? ""}`;
+      const current = productQuantities.get(key);
+      productQuantities.set(key, {
         productId,
-        (productQuantities.get(productId) ?? 0) + quantity,
-      );
+        variantId,
+        quantity: (current?.quantity ?? 0) + quantity,
+      });
     }
 
     const newItems: {
       productId: number;
+      variantId: number | null;
       quantity: number;
       unitPrice: string;
       subtotal: string;
     }[] = [];
     let totalMinor = 0n;
 
-    for (const [productId, quantity] of productQuantities.entries()) {
+    for (const { productId, variantId, quantity } of productQuantities.values()) {
       const product = await prisma.product.findUnique({
         where: {
           id: productId,
@@ -134,6 +147,28 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
         });
       }
 
+      const variant = variantId
+        ? await prisma.productVariant.findFirst({
+            where: { id: variantId, productId, isActive: true },
+          })
+        : null;
+      if (variantId && !variant) {
+        return res.status(404).json({
+          message: `Variant ${variantId} not found for ${product.name}`,
+        });
+      }
+      if (!variantId) {
+        const hasVariants = await prisma.productVariant.findFirst({
+          where: { productId, isActive: true },
+          select: { id: true },
+        });
+        if (hasVariants) {
+          return res.status(400).json({
+            message: `Select a size for ${product.name}`,
+          });
+        }
+      }
+
       if (product.stock < quantity) {
         return res.status(400).json({
           message: `Insufficient stock for ${product.name}`,
@@ -141,14 +176,15 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
       }
 
       const unitPriceMinor = toMinorUnits(
-        String(product.price),
-        `Price for ${product.name}`,
+        String(variant?.price ?? product.price),
+        `Price for ${product.name}${variant ? ` (${variant.name})` : ""}`,
       );
       const subtotalMinor = multiplyMinorUnits(unitPriceMinor, quantity);
       totalMinor += subtotalMinor;
 
       newItems.push({
         productId,
+        variantId,
         quantity,
         unitPrice: toDecimalString(unitPriceMinor),
         subtotal: toDecimalString(subtotalMinor),
@@ -244,7 +280,10 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
           status: "CONFIRMED",
           total,
           items: {
-            create: newItems,
+            create: newItems.map((item) => ({
+              ...item,
+              variantId: item.variantId ?? undefined,
+            })),
           },
           payment: {
             create: {
@@ -257,6 +296,7 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,
@@ -341,6 +381,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,
@@ -418,7 +459,10 @@ router.patch(
         });
       }
 
-      const productQuantities = new Map<number, number>();
+      const productQuantities = new Map<
+        string,
+        { productId: number; variantId: number | null; quantity: number }
+      >();
 
       for (const item of items) {
         if (!item || typeof item !== "object") {
@@ -428,11 +472,17 @@ router.patch(
         }
 
         const productId = Number(item.productId);
+        const variantId =
+          item.variantId === undefined || item.variantId === null
+            ? null
+            : Number(item.variantId);
         const quantity = Number(item.quantity);
 
         if (
           !Number.isInteger(productId) ||
           productId <= 0 ||
+          (variantId !== null &&
+            (!Number.isInteger(variantId) || variantId <= 0)) ||
           !Number.isInteger(quantity) ||
           quantity <= 0
         ) {
@@ -441,10 +491,13 @@ router.patch(
           });
         }
 
-        productQuantities.set(
+        const key = `${productId}:${variantId ?? ""}`;
+        const current = productQuantities.get(key);
+        productQuantities.set(key, {
           productId,
-          (productQuantities.get(productId) ?? 0) + quantity,
-        );
+          variantId,
+          quantity: (current?.quantity ?? 0) + quantity,
+        });
       }
 
       const updatedOrder = await prisma.$transaction(async (tx) => {
@@ -485,12 +538,13 @@ router.patch(
         const newItems: {
           orderId: number;
           productId: number;
+          variantId: number | null;
           quantity: number;
           unitPrice: string;
           subtotal: string;
         }[] = [];
 
-        for (const [productId, quantity] of productQuantities.entries()) {
+        for (const { productId, variantId, quantity } of productQuantities.values()) {
           const product = await tx.product.findUnique({
             where: {
               id: productId,
@@ -502,6 +556,30 @@ router.patch(
               404,
               `Product ${productId} not found`,
             );
+          }
+
+          const variant = variantId
+            ? await tx.productVariant.findFirst({
+                where: { id: variantId, productId, isActive: true },
+              })
+            : null;
+          if (variantId && !variant) {
+            throw new OrderRequestError(
+              404,
+              `Variant ${variantId} not found for ${product.name}`,
+            );
+          }
+          if (!variantId) {
+            const hasVariants = await tx.productVariant.findFirst({
+              where: { productId, isActive: true },
+              select: { id: true },
+            });
+            if (hasVariants) {
+              throw new OrderRequestError(
+                400,
+                `Select a size for ${product.name}`,
+              );
+            }
           }
 
           if (product.stock < quantity) {
@@ -534,14 +612,15 @@ router.patch(
           }
 
           const unitPriceMinor = toMinorUnits(
-            String(product.price),
-            `Price for ${product.name}`,
+            String(variant?.price ?? product.price),
+            `Price for ${product.name}${variant ? ` (${variant.name})` : ""}`,
           );
           const subtotalMinor = multiplyMinorUnits(unitPriceMinor, quantity);
 
           newItems.push({
             orderId,
             productId,
+            variantId,
             quantity,
             unitPrice: toDecimalString(unitPriceMinor),
             subtotal: toDecimalString(subtotalMinor),
@@ -555,7 +634,10 @@ router.patch(
         const additionalTotal = toDecimalString(additionalTotalMinor);
 
         await tx.orderItem.createMany({
-          data: newItems,
+          data: newItems.map((item) => ({
+            ...item,
+            variantId: item.variantId ?? undefined,
+          })),
         });
 
         await tx.payment.updateMany({
@@ -580,6 +662,7 @@ router.patch(
             items: {
               include: {
                 product: true,
+                variant: true,
               },
             },
             table: true,
@@ -680,7 +763,7 @@ router.patch(
           return tx.order.findUniqueOrThrow({
             where: { id: orderId },
             include: {
-              items: { include: { product: true } },
+              items: { include: { product: true, variant: true } },
               table: true,
               waiter: { select: safeWaiterSelect },
               payment: true,
@@ -725,7 +808,7 @@ router.patch(
             gstEnabled: settings.gstEnabled,
           },
           include: {
-            items: { include: { product: true } },
+            items: { include: { product: true, variant: true } },
             table: true,
             waiter: { select: safeWaiterSelect },
             payment: true,
@@ -799,6 +882,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,
@@ -839,6 +923,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,
@@ -890,6 +975,7 @@ router.get(
           items: {
             include: {
               product: true,
+              variant: true,
             },
           },
           table: true,

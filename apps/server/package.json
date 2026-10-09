@@ -8,6 +8,7 @@
     "postinstall": "prisma generate",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
+    "seed:menu": "tsx prisma/seed/seed.ts",
     "test:orders": "npm run build && node --test tests/orders.test.cjs",
     "test:financial": "npm run build && node --test tests/*.test.cjs",
     "prestart": "prisma migrate deploy",

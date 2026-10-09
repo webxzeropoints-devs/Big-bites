@@ -46,6 +46,12 @@ enum DiscountType {
   PERCENTAGE
 }
 
+enum ProductClassification {
+  VEG
+  NON_VEG
+  NOT_APPLICABLE
+}
+
 model User {
   id        Int      @id @default(autoincrement())
   name      String
@@ -70,40 +76,80 @@ model RestaurantTable {
 }
 
 model Category {
-  id        Int       @id @default(autoincrement())
-  name      String    @unique
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   products Product[]
 }
 
 model Product {
-  id        Int      @id @default(autoincrement())
-  name      String
-  price     Decimal  @db.Decimal(10, 2)
-  stock     Int      @default(0)
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                 Int                   @id @default(autoincrement())
+  slug               String                @unique
+  name               String
+  description        String                @default("")
+  price              Decimal               @db.Decimal(10, 2)
+  stock              Int                   @default(0)
+  stockUnit          String                @default("pcs")
+  lowStockThreshold  Int                   @default(0)
+  isVegetarian       Boolean               @default(true)
+  classification     ProductClassification @default(VEG)
+  subcategory        String?
+  isSignature        Boolean               @default(false)
+  isActive           Boolean               @default(true)
+  lastStockUpdatedAt DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
 
   categoryId Int
   category   Category @relation(fields: [categoryId], references: [id])
 
+  variants       ProductVariant[]
+  orderItems     OrderItem[]
+  stockMovements ProductStockMovement[]
+}
+
+model ProductVariant {
+  id        Int      @id @default(autoincrement())
+  name      String
+  price     Decimal  @db.Decimal(10, 2)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  productId Int
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
   orderItems OrderItem[]
+
+  @@unique([productId, name])
+}
+
+model ProductStockMovement {
+  id            Int      @id @default(autoincrement())
+  productId     Int
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  movementType  String   @default("ADJUSTMENT")
+  quantity      Int
+  previousStock Int
+  newStock      Int
+  reason        String   @default("")
+  createdAt     DateTime @default(now())
 }
 
 model Order {
-  id        Int         @id @default(autoincrement())
-  status    OrderStatus @default(PENDING)
-  total     Decimal     @default(0) @db.Decimal(10, 2)
-  gstRate   Decimal     @default(0) @db.Decimal(5, 2)
-  gstEnabled Boolean    @default(true)
+  id             Int           @id @default(autoincrement())
+  status         OrderStatus   @default(PENDING)
+  total          Decimal       @default(0) @db.Decimal(10, 2)
+  gstRate        Decimal       @default(0) @db.Decimal(5, 2)
+  gstEnabled     Boolean       @default(true)
   discountType   DiscountType?
   discountValue  Decimal?      @db.Decimal(10, 2)
   discountAmount Decimal       @default(0) @db.Decimal(10, 2)
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   tableId Int
   table   RestaurantTable @relation(fields: [tableId], references: [id])
@@ -130,27 +176,31 @@ model RestaurantSettings {
 }
 
 model OrderItem {
-  id        Int      @id @default(autoincrement())
+  id        Int     @id @default(autoincrement())
   quantity  Int
-  unitPrice Decimal  @db.Decimal(10, 2)
-  subtotal  Decimal  @db.Decimal(10, 2)
+  unitPrice Decimal @db.Decimal(10, 2)
+  subtotal  Decimal @db.Decimal(10, 2)
+  variantId Int?
 
-  orderId   Int
-  order     Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId Int
+  order   Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   productId Int
-  product   Product @relation(fields: [productId], references: [id])
+  product   Product         @relation(fields: [productId], references: [id])
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@index([variantId])
 }
 
 model Payment {
-  id             Int           @id @default(autoincrement())
-  amount         Decimal       @db.Decimal(10, 2)
-  amountReceived Decimal?      @db.Decimal(10, 2)
-  change         Decimal?      @db.Decimal(10, 2)
+  id             Int            @id @default(autoincrement())
+  amount         Decimal        @db.Decimal(10, 2)
+  amountReceived Decimal?       @db.Decimal(10, 2)
+  change         Decimal?       @db.Decimal(10, 2)
   method         PaymentMethod?
-  status         PaymentStatus @default(PENDING)
+  status         PaymentStatus  @default(PENDING)
   paidAt         DateTime?
-  createdAt      DateTime      @default(now())
+  createdAt      DateTime       @default(now())
 
   orderId Int   @unique
   order   Order @relation(fields: [orderId], references: [id])
