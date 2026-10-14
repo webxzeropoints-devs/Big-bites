@@ -95,6 +95,8 @@ async function writeMonthWorkbook(key: string) {
     { header: "GST Status", key: "gstStatus", width: 14 },
     { header: "Final Total", key: "total", width: 14, style: { numFmt: currencyFormat } },
     { header: "Payment Method", key: "method", width: 18 },
+    { header: "Cash", key: "cash", width: 14, style: { numFmt: currencyFormat } },
+    { header: "UPI", key: "upi", width: 14, style: { numFmt: currencyFormat } },
     { header: "Amount Received", key: "received", width: 18, style: { numFmt: currencyFormat } },
     { header: "Change", key: "change", width: 14, style: { numFmt: currencyFormat } },
     { header: "Waiter", key: "waiter", width: 22 },
@@ -106,7 +108,7 @@ async function writeMonthWorkbook(key: string) {
     fgColor: { argb: "FF252A31" },
   };
   sheet.views = [{ state: "frozen", ySplit: 1 }];
-  sheet.autoFilter = { from: "A1", to: "O1" };
+  sheet.autoFilter = { from: "A1", to: "Q1" };
 
   let incomeMinor = 0n;
   for (const order of orders) {
@@ -134,6 +136,8 @@ async function writeMonthWorkbook(key: string) {
       gstStatus: order.gstEnabled ? "ON" : "OFF",
       total: Number(payment.amount),
       method: payment.method ?? "",
+      cash: payment.cashAmount == null ? null : Number(payment.cashAmount),
+      upi: payment.upiAmount == null ? null : Number(payment.upiAmount),
       received:
         payment.amountReceived == null ? null : Number(payment.amountReceived),
       change: payment.change == null ? null : Number(payment.change),
@@ -202,6 +206,17 @@ export async function exportPaidOrderReports(orderIds: number[]) {
     reports.push(await withMonthLock(month, () => writeMonthWorkbook(month)));
   }
   return reports;
+}
+
+export async function exportMonthlyOrderReport(month: string) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+    throw new Error("Report month must use the YYYY-MM format.");
+  }
+  const [year, monthNumber] = month.split("-").map(Number);
+  if (year < 1000 || year > 9999 || monthNumber < 1 || monthNumber > 12) {
+    throw new Error("Report month is outside the supported range.");
+  }
+  return withMonthLock(month, () => writeMonthWorkbook(month));
 }
 
 export async function exportAllOrderReports() {

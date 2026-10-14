@@ -43,18 +43,22 @@ function getLanIPv4(clientAddress?: string) {
       (address) =>
         address.family === "IPv4" &&
         !address.internal &&
+        !address.address.startsWith("169.254.") &&
         isPrivateIPv4(address.address),
     );
+
   const sameSubnet = clientAddress
     ? addresses.filter((address) => {
         const mask = ipv4ToNumber(address.netmask);
         return (
+          mask !== 0xffffffff &&
           (ipv4ToNumber(address.address) & mask) ===
-          (ipv4ToNumber(clientAddress) & mask)
+            (ipv4ToNumber(clientAddress) & mask)
         );
       })
     : [];
-  const candidates = sameSubnet.length ? sameSubnet : addresses;
+
+  const candidates = clientAddress ? sameSubnet : addresses;
 
   candidates.sort((left, right) => {
     const priority = (address: string) => {
@@ -66,7 +70,6 @@ function getLanIPv4(clientAddress?: string) {
 
   return candidates[0]?.address;
 }
-
 const discoverySocket = createSocket("udp4");
 discoverySocket.on("error", (error) => {
   console.error("LAN discovery socket error:", error);

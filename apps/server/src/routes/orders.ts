@@ -307,14 +307,16 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
         },
       });
 
-      await tx.restaurantTable.update({
-        where: {
-          id: parsedTableId,
-        },
-        data: {
-          status: "OCCUPIED",
-        },
-      });
+      if (!table.isParcel) {
+        await tx.restaurantTable.update({
+          where: {
+            id: parsedTableId,
+          },
+          data: {
+            status: "OCCUPIED",
+          },
+        });
+      }
 
       return order;
     });
@@ -829,6 +831,138 @@ router.patch(
       return res.status(500).json({
         message: "Failed to send order to cashier",
       });
+    }
+  },
+);
+
+// ============================================================
+// PATCH /api/orders/:id/cancel
+// Cancel an unpaid order without removing its history.
+// ============================================================
+
+router.patch(
+  "/:id/cancel",
+  requireRoles("WAITER", "ADMIN", "CASHIER"),
+  async (req, res) => {
+    try {
+      const orderId = Number(req.params.id);
+
+      if (!Number.isInteger(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const order = await prisma.$transaction(async (tx) => {
+        const initialOrder = await tx.order.findUnique({
+          where: { id: orderId },
+          select: {
+            tableId: true,
+            table: { select: { isParcel: true } },
+          },
+        });
+        if (!initialOrder) {
+          throw new OrderRequestError(404, "Order not found");
+        }
+
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "RestaurantTable"
+          WHERE "id" = ${initialOrder.tableId}
+          FOR UPDATE
+        `;
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Order"
+          WHERE "id" = ${orderId}
+          FOR UPDATE
+        `;
+
+        const currentOrder = await tx.order.findUnique({
+          where: { id: orderId },
+          include: {
+            items: { select: { productId: true, quantity: true } },
+            payment: true,
+          },
+        });
+        if (!currentOrder) {
+          throw new OrderRequestError(404, "Order not found");
+        }
+
+        const isWaiter = req.user?.role === "WAITER";
+        if (isWaiter && req.user?.id !== currentOrder.waiterId) {
+          throw new OrderRequestError(
+            403,
+            "Waiters may only cancel their own orders",
+          );
+        }
+
+        if (
+          currentOrder.status === "COMPLETED" ||
+          currentOrder.payment?.status === "PAID"
+        ) {
+          throw new OrderRequestError(409, "A paid order cannot be cancelled");
+        }
+        if (currentOrder.payment?.status === "REFUNDED") {
+          throw new OrderRequestError(
+            409,
+            "A refunded order cannot be cancelled",
+          );
+        }
+        if (currentOrder.status === "CANCELLED") {
+          throw new OrderRequestError(409, "Order is already cancelled");
+        }
+
+        for (const item of currentOrder.items) {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stock: { increment: item.quantity } },
+          });
+        }
+
+        const cancelledOrder = await tx.order.update({
+          where: { id: orderId },
+          data: { status: "CANCELLED" },
+          include: {
+            items: { include: { product: true, variant: true } },
+            table: true,
+            waiter: { select: safeWaiterSelect },
+            payment: true,
+          },
+        });
+
+        const otherActiveOrder = await tx.order.findFirst({
+          where: {
+            tableId: currentOrder.tableId,
+            id: { not: orderId },
+            status: { notIn: ["COMPLETED", "CANCELLED"] },
+          },
+          select: { id: true },
+        });
+        const table = await tx.restaurantTable.findUnique({
+          where: { id: currentOrder.tableId },
+          select: { status: true },
+        });
+        if (
+          !initialOrder.table.isParcel &&
+          !otherActiveOrder &&
+          table?.status === "OCCUPIED"
+        ) {
+          await tx.restaurantTable.update({
+            where: { id: currentOrder.tableId },
+            data: { status: "AVAILABLE" },
+          });
+        }
+
+        return cancelledOrder;
+      });
+
+      return res.json({ message: "Order cancelled", order });
+    } catch (error) {
+      if (error instanceof OrderRequestError) {
+        return res.status(error.statusCode).json({ message: error.message });
+      }
+
+      console.error("Cancel order error:", error);
+      return res.status(500).json({ message: "Failed to cancel order" });
     }
   },
 );

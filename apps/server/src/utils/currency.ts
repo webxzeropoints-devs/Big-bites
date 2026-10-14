@@ -12,14 +12,27 @@ function parseScaledInteger(
     throw new Error(`${label} must be a valid number`);
   }
 
-  const match = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/.exec(text);
-  if (!match) {
+  const normalized = text.trim();
+  if (normalized === "" || normalized === ".") {
     throw new Error(`${label} must be a non-negative amount with at most 2 decimal places`);
   }
 
-  const whole = BigInt(match[1]);
-  const fraction = BigInt((match[2] ?? "").padEnd(2, "0") || "0");
-  const scaled = whole * 100n + fraction;
+  if ((normalized.match(/\./g) ?? []).length > 1) {
+    throw new Error(`${label} must be a non-negative amount with at most 2 decimal places`);
+  }
+
+  const [rawWhole, rawFraction = ""] = normalized.split(".");
+  if (!/^(?:\d*)$/.test(rawWhole) || !/^(?:\d{0,2})$/.test(rawFraction)) {
+    throw new Error(`${label} must be a non-negative amount with at most 2 decimal places`);
+  }
+
+  const whole = (rawWhole === "" ? "0" : rawWhole).replace(/^0+(?=\d)/, "") || "0";
+  const fraction = rawFraction.padEnd(2, "0");
+  if (whole === "" || !/^\d+$/.test(whole) || !/^\d{0,2}$/.test(fraction)) {
+    throw new Error(`${label} must be a non-negative amount with at most 2 decimal places`);
+  }
+
+  const scaled = BigInt(whole) * 100n + BigInt(fraction || "0");
   if (scaled > maximum) {
     throw new Error(`${label} exceeds the supported maximum`);
   }

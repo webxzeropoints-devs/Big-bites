@@ -37,6 +37,13 @@ test("default GST rounds total tax once, then splits 2.5% CGST and SGST", () => 
   });
 });
 
+test("currency parsing accepts normalised decimal strings with leading zeros or trailing dots", () => {
+  assert.equal(toMinorUnits("01.23"), 123n);
+  assert.equal(toMinorUnits("000.50"), 50n);
+  assert.equal(toMinorUnits("1."), 100n);
+  assert.equal(toMinorUnits(".75"), 75n);
+});
+
 test("fixed and percentage discounts apply before GST with half-up paise rounding", () => {
   assert.deepEqual(calculateDiscount("10.00", "AMOUNT", "1.25"), {
     discountAmount: 1.25,

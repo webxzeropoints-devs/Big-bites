@@ -33,6 +33,7 @@ enum PaymentMethod {
   CASH
   UPI
   CARD
+  CASH_UPI
 }
 
 enum PaymentStatus {
@@ -130,7 +131,7 @@ model ProductVariant {
 model ProductStockMovement {
   id            Int      @id @default(autoincrement())
   productId     Int
-  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
   movementType  String   @default("ADJUSTMENT")
   quantity      Int
   previousStock Int
@@ -197,6 +198,8 @@ model Payment {
   amount         Decimal        @db.Decimal(10, 2)
   amountReceived Decimal?       @db.Decimal(10, 2)
   change         Decimal?       @db.Decimal(10, 2)
+  cashAmount     Decimal?       @db.Decimal(10, 2)
+  upiAmount      Decimal?       @db.Decimal(10, 2)
   method         PaymentMethod?
   status         PaymentStatus  @default(PENDING)
   paidAt         DateTime?

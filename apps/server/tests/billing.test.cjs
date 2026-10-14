@@ -203,6 +203,78 @@ test("cash payment uses authoritative GST, exact paise change, persists tender, 
   assert.equal(retry.status, 409);
 });
 
+test("CASH + UPI payment requires an exact split and persists both tender amounts", async () => {
+  resetState([makeOrder(1, 1, "1.00")]);
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+
+  const shortSplit = await request(baseUrl, "/api/billing/orders/1/pay", {
+    token: userToken,
+    body: {
+      method: "CASH_UPI",
+      cashAmount: "0.50",
+      upiAmount: "0.54",
+    },
+  });
+  assert.equal(shortSplit.status, 400);
+  assert.equal(orders.get(1).payment.status, "PENDING");
+  assert.equal(orders.get(1).status, "READY_FOR_BILLING");
+  assert.equal(tables.get(1).status, "OCCUPIED");
+
+  const negativeSplit = await request(baseUrl, "/api/billing/orders/1/pay", {
+    token: userToken,
+    body: {
+      method: "CASH_UPI",
+      cashAmount: "-0.01",
+      upiAmount: "1.06",
+    },
+  });
+  assert.equal(negativeSplit.status, 400);
+  assert.equal(orders.get(1).payment.status, "PENDING");
+  assert.equal(orders.get(1).status, "READY_FOR_BILLING");
+  assert.equal(tables.get(1).status, "OCCUPIED");
+
+  const paid = await request(baseUrl, "/api/billing/orders/1/pay", {
+    token: userToken,
+    body: {
+      method: "CASH_UPI",
+      cashAmount: "0.50",
+      upiAmount: "0.55",
+    },
+  });
+  assert.equal(paid.status, 200);
+  const body = await paid.json();
+  assert.equal(body.total, 1.05);
+  assert.equal(body.amountReceived, 1.05);
+  assert.equal(orders.get(1).payment.method, "CASH_UPI");
+  assert.equal(orders.get(1).payment.cashAmount, "0.50");
+  assert.equal(orders.get(1).payment.upiAmount, "0.55");
+  assert.equal(orders.get(1).payment.amountReceived, "1.05");
+  assert.equal(orders.get(1).payment.change, "0.00");
+  assert.equal(orders.get(1).status, "COMPLETED");
+  assert.equal(tables.get(1).status, "AVAILABLE");
+});
+
+test("parcel payment completes its order without changing any restaurant table status", async () => {
+  const parcelOrder = makeOrder(1, 2, "1.00");
+  resetState([parcelOrder]);
+  tables.set(1, { id: 1, number: 1, isParcel: false, status: "OCCUPIED" });
+  tables.set(2, { id: 2, number: 0, isParcel: true, status: "AVAILABLE" });
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+
+  const paid = await request(baseUrl, "/api/billing/orders/1/pay", {
+    token: userToken,
+    body: { method: "UPI" },
+  });
+
+  assert.equal(paid.status, 200);
+  assert.equal(orders.get(1).status, "COMPLETED");
+  assert.equal(orders.get(1).payment.status, "PAID");
+  assert.equal(tables.get(1).status, "OCCUPIED");
+  assert.equal(tables.get(2).status, "AVAILABLE");
+});
+
 test("GST off removes tax from the bill and persists the paid GST state", async () => {
   restaurantSettings.gstEnabled = false;
   resetState([makeOrder(7, 1, "10.00")]);
@@ -344,6 +416,39 @@ test("table payment sums rounded invoice totals and records cash tender/change",
   assert.equal(orders.get(1).payment.change, "1.50");
   assert.equal(orders.get(2).payment.amountReceived, "9.45");
   assert.equal(orders.get(2).payment.change, "0.00");
+});
+
+test("table CASH + UPI payment allocates and saves exact tender breakdowns per order", async () => {
+  resetState([
+    makeOrder(1, 1, "1.00"),
+    makeOrder(2, 1, "10.00", {
+      discountType: "PERCENTAGE",
+      discountValue: "10.00",
+      discountAmount: "1.00",
+    }),
+  ]);
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+  const response = await request(baseUrl, "/api/billing/tables/1/pay", {
+    token: userToken,
+    body: {
+      method: "CASH_UPI",
+      cashAmount: "3.00",
+      upiAmount: "7.50",
+    },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.total, 10.5);
+  assert.equal(body.amountReceived, 10.5);
+  assert.equal(body.cashAmount, 3);
+  assert.equal(body.upiAmount, 7.5);
+  assert.equal(orders.get(1).payment.cashAmount, "0.30");
+  assert.equal(orders.get(1).payment.upiAmount, "0.75");
+  assert.equal(orders.get(2).payment.cashAmount, "2.70");
+  assert.equal(orders.get(2).payment.upiAmount, "6.75");
+  assert.equal(orders.get(1).payment.method, "CASH_UPI");
+  assert.equal(orders.get(2).payment.method, "CASH_UPI");
 });
 
 test("payment routes reject null or malformed request bodies without crashing", async () => {

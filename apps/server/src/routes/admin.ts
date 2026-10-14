@@ -12,6 +12,7 @@ import {
 import { hashPassword } from "../utils/password.js";
 import {
   exportAllOrderReports,
+  exportMonthlyOrderReport,
   getOrderReportSummary,
 } from "../utils/orderReports.js";
 import {
@@ -25,6 +26,258 @@ const safeUser = { id: true, name: true, username: true, role: true, createdAt: 
 const id = (value: unknown) => Number.isInteger(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const text = (value: unknown) => typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 const slugify = (value: string) => value.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const PRODUCTION_MENU_API = "https://big-bites-server.onrender.com";
+const PRODUCTION_MENU_TIMEOUT_MS = 20_000;
+
+type ProductionCategory = {
+  id: number;
+  name: string;
+  sortOrder: number;
+};
+
+type ProductionVariant = {
+  name: string;
+  price: string;
+};
+
+type ProductionProduct = {
+  slug: string;
+  name: string;
+  description: string;
+  price: string;
+  stock: number;
+  stockUnit: string;
+  lowStockThreshold: number;
+  isVegetarian: boolean;
+  classification: ProductClassification;
+  subcategory: string | null;
+  isSignature: boolean;
+  categoryId: number;
+  variants: ProductionVariant[];
+};
+
+function usesInstalledLocalDatabase() {
+  try {
+    const target = new URL(process.env.DATABASE_URL ?? "");
+    const isInstalledDatabase =
+      target.protocol === "postgresql:" &&
+      target.hostname === "127.0.0.1" &&
+      target.port === "5432" &&
+      target.pathname === "/bigbites" &&
+      target.searchParams.get("schema") === "public";
+    const isIsolatedTestDatabase =
+      process.env.NODE_ENV === "test" &&
+      target.protocol === "postgresql:" &&
+      ["127.0.0.1", "localhost", "::1"].includes(target.hostname) &&
+      target.port !== "5432" &&
+      /^\/bigbites_test_[a-z0-9_]+$/i.test(target.pathname) &&
+      target.searchParams.get("schema") === "public";
+    return isInstalledDatabase || isIsolatedTestDatabase;
+  } catch {
+    return false;
+  }
+}
+
+async function getMissingCatalogSchemaColumns() {
+  const columns = await prisma.$queryRaw<
+    { tableName: string; columnName: string }[]
+  >`
+    SELECT table_name AS "tableName", column_name AS "columnName"
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name IN ('Category', 'Product', 'ProductVariant')
+  `;
+  const available = new Set(
+    columns.map(({ tableName, columnName }) => `${tableName}.${columnName}`),
+  );
+  const required: Record<string, string[]> = {
+    Category: ["id", "name", "sortOrder"],
+    Product: [
+      "id",
+      "slug",
+      "name",
+      "description",
+      "price",
+      "stock",
+      "stockUnit",
+      "lowStockThreshold",
+      "isVegetarian",
+      "classification",
+      "subcategory",
+      "isSignature",
+      "isActive",
+      "categoryId",
+    ],
+    ProductVariant: ["id", "name", "price", "isActive", "productId"],
+  };
+  return Object.entries(required).flatMap(([tableName, columnNames]) =>
+    columnNames
+      .filter((columnName) => !available.has(`${tableName}.${columnName}`))
+      .map((columnName) => `${tableName}.${columnName}`),
+  );
+}
+
+async function fetchProductionMenu() {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    PRODUCTION_MENU_TIMEOUT_MS,
+  );
+
+  try {
+    const [categoriesResponse, productsResponse] = await Promise.all([
+      fetch(`${PRODUCTION_MENU_API}/api/products/categories`, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      }),
+      fetch(`${PRODUCTION_MENU_API}/api/products`, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      }),
+    ]);
+
+    if (!categoriesResponse.ok || !productsResponse.ok) {
+      const failedStatus = !categoriesResponse.ok
+        ? categoriesResponse.status
+        : productsResponse.status;
+      throw new Error(`Production menu request failed (HTTP ${failedStatus})`);
+    }
+
+    const [categories, products] = await Promise.all([
+      categoriesResponse.json(),
+      productsResponse.json(),
+    ]);
+    if (!Array.isArray(categories) || !Array.isArray(products)) {
+      throw new Error("Production menu response must contain category and product lists");
+    }
+
+    const categoriesById = new Map<number, ProductionCategory>();
+    const categoriesByName = new Set<string>();
+    for (const value of categories as unknown[]) {
+      if (!value || typeof value !== "object") {
+        throw new Error("Production menu contains an invalid category");
+      }
+      const category = value as Record<string, unknown>;
+      const categoryId = id(category.id);
+      const name = text(category.name);
+      const sortOrder = Number(category.sortOrder ?? 0);
+      if (
+        !categoryId ||
+        !name ||
+        !Number.isInteger(sortOrder) ||
+        categoriesById.has(categoryId) ||
+        categoriesByName.has(name)
+      ) {
+        throw new Error("Production menu contains an invalid or duplicate category");
+      }
+      categoriesById.set(categoryId, { id: categoryId, name, sortOrder });
+      categoriesByName.add(name);
+    }
+
+    const validClassifications = Object.values(ProductClassification);
+    const productsBySlug = new Set<string>();
+    const normalizedProducts: (ProductionProduct & { variants: ProductionVariant[] })[] = [];
+    for (const value of products as unknown[]) {
+      if (!value || typeof value !== "object") {
+        throw new Error("Production menu contains an invalid product");
+      }
+      const product = value as Record<string, unknown>;
+      const slug = text(product.slug);
+      const name = text(product.name);
+      const categoryId = id(product.categoryId);
+      const category = categoryId ? categoriesById.get(categoryId) : undefined;
+      const categoryValue = product.category;
+      const nestedCategory =
+        categoryValue && typeof categoryValue === "object"
+          ? (categoryValue as Record<string, unknown>)
+          : undefined;
+      const stock = Number(product.stock);
+      const lowStockThreshold = Number(product.lowStockThreshold ?? 0);
+      const stockUnit = text(product.stockUnit);
+      const classification = product.classification;
+      if (
+        !slug ||
+        !name ||
+        !category ||
+        !nestedCategory ||
+        id(nestedCategory.id) !== category.id ||
+        text(nestedCategory.name) !== category.name ||
+        productsBySlug.has(slug) ||
+        typeof product.price !== "number" && typeof product.price !== "string" ||
+        !Number.isInteger(stock) ||
+        stock < 0 ||
+        !stockUnit ||
+        !Number.isInteger(lowStockThreshold) ||
+        lowStockThreshold < 0 ||
+        typeof product.isVegetarian !== "boolean" ||
+        !validClassifications.includes(classification as ProductClassification) ||
+        product.isActive !== true ||
+        !Array.isArray(product.variants)
+      ) {
+        throw new Error("Production menu contains an incomplete, inactive, or duplicate product");
+      }
+
+      const price = toDecimalString(toMinorUnits(product.price, `Price for ${name}`));
+      const variants: ProductionVariant[] = [];
+      const variantNames = new Set<string>();
+      for (const value of product.variants as unknown[]) {
+        if (!value || typeof value !== "object") {
+          throw new Error(`Production menu contains an invalid variant for ${name}`);
+        }
+        const variant = value as Record<string, unknown>;
+        const variantName = text(variant.name);
+        if (
+          !variantName ||
+          variantNames.has(variantName.toLocaleLowerCase()) ||
+          (typeof variant.price !== "number" && typeof variant.price !== "string")
+        ) {
+          throw new Error(`Production menu contains an invalid variant for ${name}`);
+        }
+        variantNames.add(variantName.toLocaleLowerCase());
+        variants.push({
+          name: variantName,
+          price: toDecimalString(
+            toMinorUnits(variant.price, `Price for ${variantName}`),
+          ),
+        });
+      }
+
+      const subcategory =
+        product.subcategory == null ? null : text(product.subcategory);
+      if (product.subcategory != null && !subcategory) {
+        throw new Error(`Production menu contains an invalid subcategory for ${name}`);
+      }
+      productsBySlug.add(slug);
+      normalizedProducts.push({
+        slug,
+        name,
+        description:
+          typeof product.description === "string" ? product.description : "",
+        price,
+        stock,
+        stockUnit,
+        lowStockThreshold,
+        isVegetarian: product.isVegetarian,
+        classification: classification as ProductClassification,
+        subcategory,
+        isSignature: product.isSignature === true,
+        categoryId: category.id,
+        variants,
+      });
+    }
+
+    if (categoriesById.size === 0 || normalizedProducts.length === 0) {
+      throw new Error("Production menu returned no categories or active products");
+    }
+
+    return {
+      categories: [...categoriesById.values()],
+      products: normalizedProducts,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function parseVariants(value: unknown) {
   if (!Array.isArray(value)) return null;
@@ -62,6 +315,129 @@ router.get("/order-reports", async (_req, res) => {
   }
 });
 
+router.post("/catalog/sync", async (_req, res) => {
+  if (!usesInstalledLocalDatabase()) {
+    return res.status(409).json({
+      message:
+        "Production menu sync is only available when the server targets the installed local POS database",
+    });
+  }
+
+  let missingCatalogColumns: string[];
+  try {
+    missingCatalogColumns = await getMissingCatalogSchemaColumns();
+  } catch (error) {
+    console.error("Unable to verify local catalog schema:", error);
+    return res.status(503).json({
+      message:
+        "Unable to verify the local catalog schema; the production menu was not fetched and local data was not changed",
+    });
+  }
+  if (missingCatalogColumns.length > 0) {
+    return res.status(409).json({
+      message:
+        "The installed local schema cannot safely store the production catalog's variant prices. No catalog data was imported; apply an approved schema update before syncing.",
+      missingColumns: missingCatalogColumns,
+    });
+  }
+
+  let productionMenu: Awaited<ReturnType<typeof fetchProductionMenu>>;
+  try {
+    productionMenu = await fetchProductionMenu();
+  } catch (error) {
+    console.error("Production menu fetch failed:", error);
+    return res.status(502).json({
+      message:
+        error instanceof Error
+          ? error.message
+          : "Unable to load the production menu; local data was not changed",
+    });
+  }
+
+  try {
+    const summary = await prisma.$transaction(
+      async (tx) => {
+        const localCategoryIds = new Map<number, number>();
+        for (const category of productionMenu.categories) {
+          const localCategory = await tx.category.upsert({
+            where: { name: category.name },
+            create: { name: category.name, sortOrder: category.sortOrder },
+            update: { sortOrder: category.sortOrder },
+            select: { id: true },
+          });
+          localCategoryIds.set(category.id, localCategory.id);
+        }
+
+        let variantCount = 0;
+        for (const product of productionMenu.products) {
+          const categoryId = localCategoryIds.get(product.categoryId);
+          if (!categoryId) {
+            throw new Error(`No local category was created for ${product.name}`);
+          }
+
+          const catalogFields = {
+            slug: product.slug,
+            name: product.name,
+            description: product.description,
+            price: product.price,
+            stockUnit: product.stockUnit,
+            lowStockThreshold: product.lowStockThreshold,
+            isVegetarian: product.isVegetarian,
+            classification: product.classification,
+            subcategory: product.subcategory,
+            isSignature: product.isSignature,
+            isActive: true,
+            categoryId,
+          };
+          const localProduct = await tx.product.upsert({
+            where: { slug: product.slug },
+            create: {
+              ...catalogFields,
+              stock: product.stock,
+              lastStockUpdatedAt: new Date(),
+            },
+            update: catalogFields,
+            select: { id: true },
+          });
+
+          for (const variant of product.variants) {
+            await tx.productVariant.upsert({
+              where: {
+                productId_name: {
+                  productId: localProduct.id,
+                  name: variant.name,
+                },
+              },
+              create: {
+                productId: localProduct.id,
+                name: variant.name,
+                price: variant.price,
+                isActive: true,
+              },
+              update: { price: variant.price, isActive: true },
+            });
+            variantCount += 1;
+          }
+        }
+
+        return {
+          categories: productionMenu.categories.length,
+          products: productionMenu.products.length,
+          variants: variantCount,
+        };
+      },
+      { timeout: 60_000 },
+    );
+
+    return res.json(summary);
+  } catch (error) {
+    console.error("Local production catalog sync failed:", error);
+    return res.status(500).json({
+      message: "Unable to sync the production catalog; local transaction rolled back",
+    });
+  }
+});
+
 router.post("/order-reports/export", async (_req, res) => {
   try {
     return res.json({ reports: await exportAllOrderReports() });
@@ -72,6 +448,27 @@ router.post("/order-reports/export", async (_req, res) => {
         error instanceof Error
           ? error.message
           : "Unable to export monthly order reports",
+    });
+  }
+});
+
+router.post("/order-reports/export/:month", async (req, res) => {
+  try {
+    const report = await exportMonthlyOrderReport(req.params.month);
+    return res.json({ reports: [report] });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("Report month")
+    ) {
+      return res.status(400).json({ message: error.message });
+    }
+    console.error("Monthly order report export error:", error);
+    return res.status(503).json({
+      message:
+        error instanceof Error
+          ? error.message
+          : "Unable to export the selected monthly order report",
     });
   }
 });
@@ -676,13 +1073,16 @@ router.delete("/products/:id", async (req, res) => {
   try {
     const existing = await prisma.product.findUnique({
       where: { id: productId },
-      include: { orderItems: { select: { id: true } } },
+      include: {
+        orderItems: { select: { id: true } },
+        stockMovements: { select: { id: true } },
+      },
     });
     if (!existing) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    if (existing.orderItems.length > 0) {
+    if (existing.orderItems.length > 0 || existing.stockMovements.length > 0) {
       const deactivated = await prisma.product.update({
         where: { id: productId },
         data: {

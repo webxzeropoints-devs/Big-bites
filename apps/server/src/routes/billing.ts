@@ -58,6 +58,46 @@ function parseAmountReceived(method: string, rawValue: unknown) {
   }
 }
 
+function parseCashUpiAmounts(
+  method: string,
+  rawCashAmount: unknown,
+  rawUpiAmount: unknown,
+) {
+  if (method !== "CASH_UPI") {
+    if (rawCashAmount !== undefined || rawUpiAmount !== undefined) {
+      throw new BillingRequestError(
+        400,
+        "Cash and UPI amounts are only valid for CASH + UPI payments",
+      );
+    }
+    return undefined;
+  }
+
+  if (
+    (typeof rawCashAmount !== "number" && typeof rawCashAmount !== "string") ||
+    (typeof rawUpiAmount !== "number" && typeof rawUpiAmount !== "string")
+  ) {
+    throw new BillingRequestError(
+      400,
+      "Cash and UPI amounts are required for CASH + UPI payments",
+    );
+  }
+
+  try {
+    return {
+      cashMinor: toMinorUnits(rawCashAmount as CurrencyValue, "Cash amount"),
+      upiMinor: toMinorUnits(rawUpiAmount as CurrencyValue, "UPI amount"),
+    };
+  } catch (error) {
+    throw new BillingRequestError(
+      400,
+      error instanceof Error
+        ? error.message
+        : "Cash and UPI amounts must be valid non-negative amounts",
+    );
+  }
+}
+
 /*
 |--------------------------------------------------------------------------
 | GET /api/billing/orders
@@ -479,20 +519,25 @@ router.post(
     try {
       const orderId = Number(req.params.id);
       const body = req.body && typeof req.body === "object" ? req.body : {};
-      const { method, amountReceived } = body;
+      const { method, amountReceived, cashAmount, upiAmount } = body;
 
       if (!Number.isInteger(orderId) || orderId <= 0) {
         return res.status(400).json({ message: "Invalid order ID" });
       }
 
-      const allowedMethods = ["CASH", "UPI", "CARD"];
+      const allowedMethods = ["CASH", "UPI", "CARD", "CASH_UPI"];
       if (!allowedMethods.includes(method)) {
         return res.status(400).json({
-          message: "Payment method must be CASH, UPI or CARD",
+          message: "Payment method must be CASH, UPI, CARD or CASH + UPI",
         });
       }
 
       const receivedMinor = parseAmountReceived(method, amountReceived);
+      const splitAmounts = parseCashUpiAmounts(
+        method,
+        cashAmount,
+        upiAmount,
+      );
 
       const result = await prisma.$transaction(async (tx) => {
         const initialOrder = await tx.order.findUnique({
@@ -509,6 +554,14 @@ router.post(
           WHERE "id" = ${initialOrder.tableId}
           FOR UPDATE
         `;
+
+        const table = await tx.restaurantTable.findUnique({
+          where: { id: initialOrder.tableId },
+          select: { isParcel: true },
+        });
+        if (!table) {
+          throw new BillingRequestError(404, "Table not found");
+        }
 
         await tx.$queryRaw`
           SELECT "id"
@@ -562,24 +615,47 @@ router.post(
             "Amount received cannot be less than the amount due",
           );
         }
+        if (
+          splitAmounts &&
+          splitAmounts.cashMinor + splitAmounts.upiMinor !== totalMinor
+        ) {
+          throw new BillingRequestError(
+            400,
+            "Cash and UPI amounts must add up exactly to the amount due",
+          );
+        }
 
         const paidAt = new Date();
         const received = receivedMinor ?? totalMinor;
         const changeMinor =
-          method === "CASH" ? received - totalMinor : undefined;
+          method === "CASH"
+            ? received - totalMinor
+            : splitAmounts
+              ? 0n
+              : undefined;
         const payment = order.payment
           ? await tx.payment.update({
               where: { orderId },
               data: {
                 amount: toDecimalString(totalMinor),
                 amountReceived:
-                  receivedMinor === undefined && method !== "CASH"
-                    ? null
-                    : toDecimalString(received),
+                  method === "CASH" || splitAmounts
+                    ? toDecimalString(
+                        splitAmounts
+                          ? splitAmounts.cashMinor + splitAmounts.upiMinor
+                          : received,
+                      )
+                    : null,
                 change:
                   changeMinor === undefined
                     ? null
                     : toDecimalString(changeMinor),
+                cashAmount: splitAmounts
+                  ? toDecimalString(splitAmounts.cashMinor)
+                  : null,
+                upiAmount: splitAmounts
+                  ? toDecimalString(splitAmounts.upiMinor)
+                  : null,
                 method,
                 status: "PAID",
                 paidAt,
@@ -590,13 +666,23 @@ router.post(
                 orderId,
                 amount: toDecimalString(totalMinor),
                 amountReceived:
-                  receivedMinor === undefined && method !== "CASH"
-                    ? null
-                    : toDecimalString(received),
+                  method === "CASH" || splitAmounts
+                    ? toDecimalString(
+                        splitAmounts
+                          ? splitAmounts.cashMinor + splitAmounts.upiMinor
+                          : received,
+                      )
+                    : null,
                 change:
                   changeMinor === undefined
                     ? null
                     : toDecimalString(changeMinor),
+                cashAmount: splitAmounts
+                  ? toDecimalString(splitAmounts.cashMinor)
+                  : null,
+                upiAmount: splitAmounts
+                  ? toDecimalString(splitAmounts.upiMinor)
+                  : null,
                 method,
                 status: "PAID",
                 paidAt,
@@ -634,7 +720,7 @@ router.post(
           select: { id: true },
         });
 
-        if (!otherActiveOrder) {
+        if (!otherActiveOrder && !table.isParcel) {
           await tx.restaurantTable.update({
             where: { id: order.tableId },
             data: { status: "AVAILABLE" },
@@ -673,7 +759,13 @@ router.post(
         total: fromMinorUnits(totalMinor),
         finalTotal: fromMinorUnits(totalMinor),
         amountReceived:
-          method === "CASH" ? fromMinorUnits(received) : null,
+          method === "CASH" || splitAmounts
+            ? fromMinorUnits(
+                splitAmounts
+                  ? splitAmounts.cashMinor + splitAmounts.upiMinor
+                  : received,
+              )
+            : null,
         change:
           method === "CASH"
             ? fromMinorUnits(received - totalMinor)
@@ -841,7 +933,7 @@ router.post(
     try {
       const tableId = Number(req.params.tableId);
       const body = req.body && typeof req.body === "object" ? req.body : {};
-      const { method, amountReceived } = body;
+      const { method, amountReceived, cashAmount, upiAmount } = body;
 
       if (!Number.isInteger(tableId) || tableId <= 0) {
         return res.status(400).json({
@@ -849,15 +941,20 @@ router.post(
         });
       }
 
-      const allowedMethods = ["CASH", "UPI", "CARD"];
+      const allowedMethods = ["CASH", "UPI", "CARD", "CASH_UPI"];
 
       if (!allowedMethods.includes(method)) {
         return res.status(400).json({
-          message: "Payment method must be CASH, UPI or CARD",
+          message: "Payment method must be CASH, UPI, CARD or CASH + UPI",
         });
       }
 
       const receivedMinor = parseAmountReceived(method, amountReceived);
+      const splitAmounts = parseCashUpiAmounts(
+        method,
+        cashAmount,
+        upiAmount,
+      );
 
       const table = await prisma.restaurantTable.findUnique({
         where: {
@@ -929,6 +1026,47 @@ router.post(
             "Amount received cannot be less than the amount due",
           );
         }
+        if (
+          splitAmounts &&
+          splitAmounts.cashMinor + splitAmounts.upiMinor !== totalMinor
+        ) {
+          throw new BillingRequestError(
+            400,
+            "Cash and UPI amounts must add up exactly to the amount due",
+          );
+        }
+
+        const splitCashByOrder = new Map<number, bigint>();
+        if (splitAmounts) {
+          let remainingCashMinor = splitAmounts.cashMinor;
+          if (totalMinor > 0n) {
+            for (const order of billableOrders) {
+              const orderTotalMinor = toMinorUnits(
+                calculateOrderAmounts(order).grandTotal,
+              );
+              const orderCashMinor =
+                (splitAmounts.cashMinor * orderTotalMinor) / totalMinor;
+              splitCashByOrder.set(order.id, orderCashMinor);
+              remainingCashMinor -= orderCashMinor;
+            }
+          }
+          for (const order of billableOrders) {
+            if (remainingCashMinor === 0n) break;
+            const orderTotalMinor = toMinorUnits(
+              calculateOrderAmounts(order).grandTotal,
+            );
+            const orderCashMinor = splitCashByOrder.get(order.id) ?? 0n;
+            const additionalCashMinor =
+              orderTotalMinor - orderCashMinor < remainingCashMinor
+                ? orderTotalMinor - orderCashMinor
+                : remainingCashMinor;
+            splitCashByOrder.set(
+              order.id,
+              orderCashMinor + additionalCashMinor,
+            );
+            remainingCashMinor -= additionalCashMinor;
+          }
+        }
 
         const payments = [];
 
@@ -950,6 +1088,13 @@ router.post(
           const orderTotalMinor = toMinorUnits(
             calculateOrderAmounts(order).grandTotal,
           );
+          const splitOrderCashMinor = splitAmounts
+            ? (splitCashByOrder.get(order.id) ?? 0n)
+            : undefined;
+          const splitOrderUpiMinor =
+            splitOrderCashMinor === undefined
+              ? undefined
+              : orderTotalMinor - splitOrderCashMinor;
           const tableChangeMinor =
             method === "CASH"
               ? (receivedMinor ?? totalMinor) - totalMinor
@@ -972,12 +1117,24 @@ router.post(
                   amount: toDecimalString(orderTotalMinor),
                   amountReceived:
                     orderReceivedMinor === undefined
-                      ? null
+                      ? splitAmounts
+                        ? toDecimalString(orderTotalMinor)
+                        : null
                       : toDecimalString(orderReceivedMinor),
                   change:
                     orderChangeMinor === undefined
-                      ? null
+                      ? splitAmounts
+                        ? "0.00"
+                        : null
                       : toDecimalString(orderChangeMinor),
+                  cashAmount:
+                    splitOrderCashMinor === undefined
+                      ? null
+                      : toDecimalString(splitOrderCashMinor),
+                  upiAmount:
+                    splitOrderUpiMinor === undefined
+                      ? null
+                      : toDecimalString(splitOrderUpiMinor),
                   method,
                   status: "PAID",
                   paidAt,
@@ -989,12 +1146,24 @@ router.post(
                   amount: toDecimalString(orderTotalMinor),
                   amountReceived:
                     orderReceivedMinor === undefined
-                      ? null
+                      ? splitAmounts
+                        ? toDecimalString(orderTotalMinor)
+                        : null
                       : toDecimalString(orderReceivedMinor),
                   change:
                     orderChangeMinor === undefined
-                      ? null
+                      ? splitAmounts
+                        ? "0.00"
+                        : null
                       : toDecimalString(orderChangeMinor),
+                  cashAmount:
+                    splitOrderCashMinor === undefined
+                      ? null
+                      : toDecimalString(splitOrderCashMinor),
+                  upiAmount:
+                    splitOrderUpiMinor === undefined
+                      ? null
+                      : toDecimalString(splitOrderUpiMinor),
                   method,
                   status: "PAID",
                   paidAt,
@@ -1026,7 +1195,7 @@ router.post(
           ? currentTable.status
           : "AVAILABLE";
 
-        if (!otherActiveOrder) {
+        if (!otherActiveOrder && !currentTable.isParcel) {
           await tx.restaurantTable.update({
             where: {
               id: tableId,
@@ -1095,10 +1264,26 @@ router.post(
         total: fromMinorUnits(result.totalMinor),
 
         amountReceived:
-          method === "CASH" ? fromMinorUnits(received) : null,
+          method === "CASH" || splitAmounts
+            ? fromMinorUnits(
+                splitAmounts
+                  ? splitAmounts.cashMinor + splitAmounts.upiMinor
+                  : received,
+              )
+            : null,
 
         change:
-          method === "CASH" ? fromMinorUnits(change) : null,
+          method === "CASH" || splitAmounts
+            ? fromMinorUnits(change)
+            : null,
+
+        cashAmount: splitAmounts
+          ? fromMinorUnits(splitAmounts.cashMinor)
+          : null,
+
+        upiAmount: splitAmounts
+          ? fromMinorUnits(splitAmounts.upiMinor)
+          : null,
 
         method,
 

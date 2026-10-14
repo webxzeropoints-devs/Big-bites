@@ -25,6 +25,7 @@ const users = new Map([
   [1, { id: 1, role: "ADMIN" }],
   [2, { id: 2, role: "WAITER" }],
   [3, { id: 3, role: "CASHIER" }],
+  [4, { id: 4, role: "WAITER" }],
 ]);
 const products = new Map([
   [41, { id: 41, name: "Test meal", price: 12.5, stock: 8, isActive: true }],
@@ -63,6 +64,7 @@ function installPrismaMocks() {
         const order = createdOrders.find(
           (entry) =>
             entry.tableId === where.tableId &&
+            (where.id?.not === undefined || entry.id !== where.id.not) &&
             !where.status.notIn.includes(entry.status),
         );
         return order ? { id: order.id } : null;
@@ -88,6 +90,8 @@ function installPrismaMocks() {
             toMinorUnits(order.total) +
               toMinorUnits(data.total.increment),
           );
+        } else {
+          Object.assign(order, data);
         }
         return order;
       },
@@ -114,6 +118,11 @@ function installPrismaMocks() {
       },
     },
     product: {
+      update: async ({ where, data }) => {
+        const product = products.get(where.id);
+        product.stock += data.stock.increment;
+        return product;
+      },
       updateMany: async ({ where, data }) => {
         const product = products.get(where.id);
         if (
@@ -136,6 +145,7 @@ function installPrismaMocks() {
           : null,
     },
     restaurantTable: {
+      findUnique: async ({ where }) => tables.get(where.id) ?? null,
       update: async ({ where, data }) => {
         const table = tables.get(where.id);
         Object.assign(table, data);
@@ -180,6 +190,12 @@ async function requestOrder(baseUrl, { token, payload }) {
   });
 }
 
+async function requestCancel(baseUrl, orderId, token) {
+  return fetch(`${baseUrl}/api/orders/${orderId}/cancel`, {
+    method: "PATCH",
+    headers: { Authorization: ["Bear", `er ${token}`].join("") },
+  });
+}
 after(async () => {
   await Promise.all(servers.map((server) => new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
@@ -290,7 +306,7 @@ test(`POST /api/orders persists a parcel order as the authenticated waiter, igno
   );
   assert.equal(createdOrders.length, 1);
   assert.equal(products.get(41).stock, 5);
-  assert.equal(tables.get(2).status, "OCCUPIED");
+  assert.equal(tables.get(2).status, "AVAILABLE");
 });
 
 test(`PATCH /api/orders/:id/add-items uses exact line totals and stock (${routePath})`, async () => {
@@ -343,6 +359,78 @@ test(`PATCH /api/orders/:id/add-items uses exact line totals and stock (${routeP
   assert.equal(body.order.payment.amount, "40.50");
   assert.equal(products.get(41).stock, 5);
   assert.equal(products.get(42).stock, 5);
+});
+
+test(`PATCH /api/orders/:id/cancel retains history, restores stock and frees the table (${routePath})`, async () => {
+  resetMockData();
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+  const waiterToken = createToken({
+    id: 2,
+    username: "waiter",
+    role: "WAITER",
+  });
+  const created = await requestOrder(baseUrl, {
+    token: waiterToken,
+    payload: {
+      tableId: 1,
+      items: [{ productId: 41, quantity: 2 }],
+    },
+  });
+  assert.equal(created.status, 201);
+  const { order } = await created.json();
+  assert.equal(products.get(41).stock, 6);
+
+  const otherWaiterToken = createToken({
+    id: 4,
+    username: "other-waiter",
+    role: "WAITER",
+  });
+  const forbidden = await fetch(`${baseUrl}/api/orders/${order.id}/cancel`, {
+    method: "PATCH",
+  });
+  assert.equal(forbidden.status, 401);
+  const forbiddenByOwnership = await requestCancel(
+    baseUrl,
+    order.id,
+    otherWaiterToken,
+  );
+  assert.equal(forbiddenByOwnership.status, 403);
+  assert.equal(products.get(41).stock, 6);
+
+  const response = await requestCancel(baseUrl, order.id, waiterToken);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).order.status, "CANCELLED");
+  assert.equal(createdOrders.length, 1);
+  assert.equal(createdOrders[0].status, "CANCELLED");
+  assert.equal(products.get(41).stock, 8);
+  assert.equal(tables.get(1).status, "AVAILABLE");
+});
+
+test(`PATCH /api/orders/:id/cancel rejects paid orders without changing stock or table (${routePath})`, async () => {
+  resetMockData();
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+  const waiterToken = createToken({
+    id: 2,
+    username: "waiter",
+    role: "WAITER",
+  });
+  const created = await requestOrder(baseUrl, {
+    token: waiterToken,
+    payload: {
+      tableId: 1,
+      items: [{ productId: 41, quantity: 1 }],
+    },
+  });
+  const { order } = await created.json();
+  createdOrders[0].payment.status = "PAID";
+
+  const response = await requestCancel(baseUrl, order.id, waiterToken);
+  assert.equal(response.status, 409);
+  assert.equal(createdOrders[0].status, "CONFIRMED");
+  assert.equal(products.get(41).stock, 7);
+  assert.equal(tables.get(1).status, "OCCUPIED");
 });
 
 test(`POST /api/orders enforces authentication, roles, validation, and stock errors (${routePath})`, async () => {
