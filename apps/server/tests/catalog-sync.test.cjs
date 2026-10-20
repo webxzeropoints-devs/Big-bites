@@ -36,9 +36,6 @@ const currentSchemaColumns = [
     "name",
     "description",
     "price",
-    "stock",
-    "stockUnit",
-    "lowStockThreshold",
     "isVegetarian",
     "classification",
     "subcategory",
@@ -63,9 +60,6 @@ const products = [
     name: "Test meal",
     description: "Production description",
     price: 45,
-    stock: 8,
-    stockUnit: "pcs",
-    lowStockThreshold: 2,
     isVegetarian: true,
     classification: "VEG",
     subcategory: null,
@@ -161,7 +155,7 @@ after(async () => {
   );
 });
 
-test("admin catalog sync imports production fields without overwriting local stock", async () => {
+test("admin catalog sync imports production catalog fields without stock", async () => {
   installPrismaMocks();
   const requestedUrls = installFetchMock();
   const baseUrl = await createAppServer();
@@ -177,14 +171,14 @@ test("admin catalog sync imports production fields without overwriting local sto
   assert.equal(requestedUrls.length, 2);
   assert.equal(categoryUpserts.length, 2);
   assert.equal(productUpserts.length, 1);
-  assert.equal(productUpserts[0].create.stock, 8);
+  assert.equal(Object.hasOwn(productUpserts[0].create, "stock"), false);
   assert.equal(Object.hasOwn(productUpserts[0].update, "stock"), false);
   assert.equal(productUpserts[0].update.price, "45.00");
   assert.equal(productUpserts[0].update.categoryId, 101);
   assert.equal(variantUpserts[0].create.price, "30.00");
 });
 
-test("repeated catalog sync is idempotent and preserves local-only records and stock", async () => {
+test("repeated catalog sync is idempotent and preserves local-only records", async () => {
   localCategories = new Map([
     ["Starters", { id: 101, name: "Starters", sortOrder: 99 }],
     ["Local-only", { id: 103, name: "Local-only", sortOrder: 7 }],
@@ -194,14 +188,12 @@ test("repeated catalog sync is idempotent and preserves local-only records and s
       id: 201,
       slug: "starters-test-meal",
       name: "Old local name",
-      stock: 19,
       categoryId: 101,
     }],
     ["local-only-meal", {
       id: 202,
       slug: "local-only-meal",
       name: "Local meal",
-      stock: 4,
       categoryId: 103,
     }],
   ]);
@@ -269,7 +261,6 @@ test("repeated catalog sync is idempotent and preserves local-only records and s
   assert.equal(localVariants.size, 2);
   assert.equal(localCategories.get("Local-only").sortOrder, 7);
   assert.equal(localProducts.get("local-only-meal").name, "Local meal");
-  assert.equal(localProducts.get("starters-test-meal").stock, 19);
   assert.equal(localVariants.get("201:Local size").price, "12.00");
 });
 
@@ -294,7 +285,7 @@ test("catalog sync refuses the installed legacy schema before fetching or writin
   const legacyColumns = [
     ["Category", "id"],
     ["Category", "name"],
-    ...["id", "name", "price", "stock", "isActive", "categoryId"].map(
+    ...["id", "name", "price", "isActive", "categoryId"].map(
       (columnName) => ["Product", columnName],
     ),
   ];
@@ -360,7 +351,7 @@ test("catalog sync refuses to write when the backend is not configured for the i
   }
 });
 
-test("only administrators can update product stock through the API", async () => {
+test("stock management endpoint is removed", async () => {
   transactionCount = 0;
   prisma.$transaction = async (callback) => {
     transactionCount += 1;
@@ -401,12 +392,8 @@ test("only administrators can update product stock through the API", async () =>
 
   assert.equal((await requestStockChange(waiterToken)).status, 403);
   assert.equal((await requestStockChange(cashierToken)).status, 403);
+  assert.equal((await requestStockChange(adminToken)).status, 404);
   assert.equal(transactionCount, 0);
-
-  const adminResponse = await requestStockChange(adminToken);
-  assert.equal(adminResponse.status, 200);
-  assert.equal((await adminResponse.json()).stock, 12);
-  assert.equal(transactionCount, 1);
 });
 
 test("monthly report API exports only the requested month for administrators", async () => {

@@ -14,7 +14,6 @@ const adminToken = createToken({
   username: "admin",
   role: "ADMIN",
 });
-const products = new Map();
 const orders = new Map();
 const payments = new Map();
 const tables = new Map();
@@ -24,14 +23,12 @@ let deletedPaymentOrderIds;
 let orderSequenceResetCount;
 
 function resetState({ status = "CONFIRMED", paymentStatus = "PENDING" } = {}) {
-  products.clear();
   orders.clear();
   payments.clear();
   tables.clear();
   deletedOrderIds = [];
   deletedPaymentOrderIds = [];
   orderSequenceResetCount = 0;
-  products.set(41, { id: 41, stock: 2 });
   tables.set(1, { id: 1, status: "OCCUPIED" });
   const payment = {
     id: 11,
@@ -67,13 +64,6 @@ function installPrismaMocks() {
       },
       findFirst: async () => null,
       count: async () => orders.size,
-    },
-    product: {
-      update: async ({ where, data }) => {
-        const product = products.get(where.id);
-        product.stock += data.stock.increment;
-        return product;
-      },
     },
     payment: {
       deleteMany: async ({ where }) => {
@@ -138,14 +128,13 @@ test("order sequence lock returns a Prisma-supported scalar", async () => {
   assert.match(lockQuery, /SELECT 1 FROM sequence_lock/);
 });
 
-test("deleting an unpaid order returns its stock and clears table state transactionally", async () => {
+test("deleting an unpaid order clears table state transactionally", async () => {
   resetState();
   installPrismaMocks();
   const baseUrl = await createAppServer();
   const response = await deleteOrder(baseUrl);
 
   assert.equal(response.status, 204);
-  assert.equal(products.get(41).stock, 5);
   assert.equal(orders.has(1), false);
   assert.equal(payments.has(1), false);
   assert.equal(tables.get(1).status, "AVAILABLE");
@@ -154,7 +143,7 @@ test("deleting an unpaid order returns its stock and clears table state transact
   assert.equal(orderSequenceResetCount, 1);
 });
 
-test("paid, refunded, and completed orders are deleted with payments without restoring stock", async () => {
+test("paid, refunded, and completed orders are deleted with payments", async () => {
   for (const scenario of [
     { status: "COMPLETED", paymentStatus: "PAID" },
     { status: "READY_FOR_BILLING", paymentStatus: "REFUNDED" },
@@ -165,7 +154,6 @@ test("paid, refunded, and completed orders are deleted with payments without res
     const response = await deleteOrder(baseUrl);
 
     assert.equal(response.status, 204);
-    assert.equal(products.get(41).stock, 2);
     assert.equal(orders.has(1), false);
     assert.equal(payments.has(1), false);
     assert.deepEqual(deletedOrderIds, [1]);

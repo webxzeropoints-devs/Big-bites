@@ -45,9 +45,6 @@ type ProductionProduct = {
   name: string;
   description: string;
   price: string;
-  stock: number;
-  stockUnit: string;
-  lowStockThreshold: number;
   isVegetarian: boolean;
   classification: ProductClassification;
   subcategory: string | null;
@@ -98,9 +95,6 @@ async function getMissingCatalogSchemaColumns() {
       "name",
       "description",
       "price",
-      "stock",
-      "stockUnit",
-      "lowStockThreshold",
       "isVegetarian",
       "classification",
       "subcategory",
@@ -191,9 +185,6 @@ async function fetchProductionMenu() {
         categoryValue && typeof categoryValue === "object"
           ? (categoryValue as Record<string, unknown>)
           : undefined;
-      const stock = Number(product.stock);
-      const lowStockThreshold = Number(product.lowStockThreshold ?? 0);
-      const stockUnit = text(product.stockUnit);
       const classification = product.classification;
       if (
         !slug ||
@@ -204,11 +195,6 @@ async function fetchProductionMenu() {
         text(nestedCategory.name) !== category.name ||
         productsBySlug.has(slug) ||
         typeof product.price !== "number" && typeof product.price !== "string" ||
-        !Number.isInteger(stock) ||
-        stock < 0 ||
-        !stockUnit ||
-        !Number.isInteger(lowStockThreshold) ||
-        lowStockThreshold < 0 ||
         typeof product.isVegetarian !== "boolean" ||
         !validClassifications.includes(classification as ProductClassification) ||
         product.isActive !== true ||
@@ -254,9 +240,6 @@ async function fetchProductionMenu() {
         description:
           typeof product.description === "string" ? product.description : "",
         price,
-        stock,
-        stockUnit,
-        lowStockThreshold,
         isVegetarian: product.isVegetarian,
         classification: classification as ProductClassification,
         subcategory,
@@ -380,8 +363,6 @@ router.post("/catalog/sync", async (_req, res) => {
             name: product.name,
             description: product.description,
             price: product.price,
-            stockUnit: product.stockUnit,
-            lowStockThreshold: product.lowStockThreshold,
             isVegetarian: product.isVegetarian,
             classification: product.classification,
             subcategory: product.subcategory,
@@ -393,8 +374,6 @@ router.post("/catalog/sync", async (_req, res) => {
             where: { slug: product.slug },
             create: {
               ...catalogFields,
-              stock: product.stock,
-              lastStockUpdatedAt: new Date(),
             },
             update: catalogFields,
             select: { id: true },
@@ -779,8 +758,6 @@ router.get("/products", async (_req, res) => {
       products.map((product) => ({
         ...product,
         price: Number(product.price),
-        stock: Number(product.stock),
-        lowStockThreshold: Number(product.lowStockThreshold ?? 0),
         isVegetarian: Boolean(product.isVegetarian),
         isSignature: Boolean(product.isSignature),
         variants: product.variants.map((variant) => ({
@@ -798,9 +775,6 @@ router.post("/products", async (req, res) => {
   const name = text(req.body.name);
   const categoryId = id(req.body.categoryId);
   const description = typeof req.body.description === "string" ? req.body.description.trim() : "";
-  const stockUnit = typeof req.body.stockUnit === "string" && req.body.stockUnit.trim() ? req.body.stockUnit.trim() : "pcs";
-  const stock = Number(req.body.stock ?? 0);
-  const lowStockThreshold = Number(req.body.lowStockThreshold ?? 0);
   const isVegetarian = req.body.isVegetarian !== undefined ? Boolean(req.body.isVegetarian) : true;
   const isSignature = Boolean(req.body.isSignature);
   const isActive = req.body.isActive !== undefined ? Boolean(req.body.isActive) : true;
@@ -824,9 +798,9 @@ router.post("/products", async (req, res) => {
       message: "Price must be a non-negative amount with at most 2 decimal places",
     });
   }
-  if (!name || !categoryId || !Number.isInteger(stock) || stock < 0 || !Number.isInteger(lowStockThreshold) || lowStockThreshold < 0) {
+  if (!name || !categoryId) {
     return res.status(400).json({
-      message: "Valid name, category, price, stock, and low-stock threshold are required",
+      message: "Valid name and category are required",
     });
   }
   const category = await prisma.category.findUnique({ where: { id: categoryId } });
@@ -841,15 +815,11 @@ router.post("/products", async (req, res) => {
         description,
         categoryId,
         price,
-        stock,
-        stockUnit,
-        lowStockThreshold,
         isVegetarian: classification === ProductClassification.VEG,
         classification,
         subcategory,
         isSignature,
         isActive,
-        lastStockUpdatedAt: new Date(),
         variants: { create: variants },
       },
       include: { category: true, variants: { where: { isActive: true }, orderBy: { id: "asc" } } },
@@ -857,8 +827,6 @@ router.post("/products", async (req, res) => {
     return res.status(201).json({
       ...product,
       price: Number(product.price),
-      stock: Number(product.stock),
-      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
       variants: product.variants.map((variant) => ({
         ...variant,
         price: Number(variant.price),
@@ -877,15 +845,11 @@ router.patch("/products/:id", async (req, res) => {
     description?: string;
     categoryId?: number;
     price?: string;
-    stock?: number;
-    stockUnit?: string;
-    lowStockThreshold?: number;
     isVegetarian?: boolean;
     classification?: ProductClassification;
     subcategory?: string | null;
     isSignature?: boolean;
     isActive?: boolean;
-    lastStockUpdatedAt?: Date;
   } = {};
   if (req.body.name !== undefined) {
     const name = text(req.body.name);
@@ -908,22 +872,6 @@ router.patch("/products/:id", async (req, res) => {
         message: "Price must be a non-negative amount with at most 2 decimal places",
       });
     }
-  }
-  if (req.body.stock !== undefined) {
-    const stock = Number(req.body.stock);
-    if (!Number.isInteger(stock) || stock < 0) {
-      return res.status(400).json({ message: "Stock must be a non-negative integer" });
-    }
-    data.stock = stock;
-    data.lastStockUpdatedAt = new Date();
-  }
-  if (typeof req.body.stockUnit === "string" && req.body.stockUnit.trim()) { data.stockUnit = req.body.stockUnit.trim(); }
-  if (req.body.lowStockThreshold !== undefined) {
-    const lowStockThreshold = Number(req.body.lowStockThreshold);
-    if (!Number.isInteger(lowStockThreshold) || lowStockThreshold < 0) {
-      return res.status(400).json({ message: "Low-stock threshold must be a non-negative integer" });
-    }
-    data.lowStockThreshold = lowStockThreshold;
   }
   if (req.body.classification !== undefined) {
     if (!Object.values(ProductClassification).includes(req.body.classification)) {
@@ -988,8 +936,6 @@ router.patch("/products/:id", async (req, res) => {
     return res.json({
       ...product,
       price: Number(product.price),
-      stock: Number(product.stock),
-      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
       variants: product.variants.map((variant) => ({
         ...variant,
         price: Number(variant.price),
@@ -998,72 +944,6 @@ router.patch("/products/:id", async (req, res) => {
   } catch (error) {
     console.error("Update product error:", error);
     return res.status(404).json({ message: "Product or category not found" });
-  }
-});
-router.patch("/products/:id/stock", async (req, res) => {
-  const productId = id(req.params.id);
-  if (!productId) return res.status(400).json({ message: "Invalid product ID" });
-  const reason = typeof req.body.reason === "string" ? req.body.reason.trim() : "Manual stock update";
-
-  const nextStock = Number(req.body.newStock ?? req.body.quantity ?? 0);
-  const delta = Number(req.body.quantity ?? 0);
-  const isAdjustment = req.body.newStock !== undefined;
-
-  if (isAdjustment) {
-    if (!Number.isInteger(nextStock) || nextStock < 0) {
-      return res.status(400).json({ message: "New stock quantity must be a non-negative integer" });
-    }
-  } else {
-    if (!Number.isInteger(delta) || delta <= 0) {
-      return res.status(400).json({ message: "Added stock quantity must be a positive integer" });
-    }
-  }
-
-  try {
-    const product = await prisma.$transaction(async (tx) => {
-      const current = await tx.product.findUnique({ where: { id: productId } });
-      if (!current) {
-        throw new Error("PRODUCT_NOT_FOUND");
-      }
-      const previousStock = current.stock;
-      const newQuantity = isAdjustment ? nextStock : previousStock + delta;
-      if (newQuantity < 0) {
-        throw new Error("Invalid stock update");
-      }
-      const updated = await tx.product.update({
-        where: { id: productId },
-        data: {
-          stock: newQuantity,
-          isActive: newQuantity > 0 || current.isActive,
-          lastStockUpdatedAt: new Date(),
-        },
-        include: { category: true },
-      });
-      await tx.productStockMovement.create({
-        data: {
-          productId,
-          movementType: isAdjustment ? "ADJUSTMENT" : "RESTOCK",
-          quantity: isAdjustment ? newQuantity - previousStock : delta,
-          previousStock,
-          newStock: newQuantity,
-          reason: reason || (isAdjustment ? "Manual stock adjustment" : "Stock added"),
-        },
-      });
-      return updated;
-    });
-
-    return res.json({
-      ...product,
-      price: Number(product.price),
-      stock: Number(product.stock),
-      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === "PRODUCT_NOT_FOUND") {
-      return res.status(404).json({ message: "Product not found" });
-    }
-    console.error("Stock update error:", error);
-    return res.status(400).json({ message: "Unable to update stock" });
   }
 });
 router.delete("/products/:id", async (req, res) => {
@@ -1075,20 +955,17 @@ router.delete("/products/:id", async (req, res) => {
       where: { id: productId },
       include: {
         orderItems: { select: { id: true } },
-        stockMovements: { select: { id: true } },
       },
     });
     if (!existing) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    if (existing.orderItems.length > 0 || existing.stockMovements.length > 0) {
+    if (existing.orderItems.length > 0) {
       const deactivated = await prisma.product.update({
         where: { id: productId },
         data: {
           isActive: false,
-          stock: 0,
-          lowStockThreshold: 0,
         },
       });
       return res.status(200).json({
@@ -1160,26 +1037,11 @@ router.delete("/orders/:id", requireRoles("ADMIN"), async (req, res) => {
       const currentOrder = await tx.order.findUnique({
         where: { id: orderId },
         include: {
-          items: { select: { productId: true, quantity: true } },
           payment: true,
         },
       });
       if (!currentOrder) {
         throw new Error("ORDER_NOT_FOUND");
-      }
-
-      const orderWasPaidOrCompleted =
-        currentOrder.status === "COMPLETED" ||
-        currentOrder.payment?.status === "PAID" ||
-        currentOrder.payment?.status === "REFUNDED";
-
-      if (!orderWasPaidOrCompleted) {
-        for (const item of currentOrder.items) {
-          await tx.product.update({
-            where: { id: item.productId },
-            data: { stock: { increment: item.quantity } },
-          });
-        }
       }
 
       await tx.payment.deleteMany({ where: { orderId } });

@@ -17,16 +17,13 @@ const products = new Map();
 const servers = [];
 let deletedProductIds;
 
-function resetState(stockMovements = []) {
+function resetState(orderItems = []) {
   products.clear();
   deletedProductIds = [];
   products.set(41, {
     id: 41,
     isActive: true,
-    stock: 12,
-    lowStockThreshold: 2,
-    orderItems: [],
-    stockMovements,
+    orderItems,
   });
 }
 
@@ -78,7 +75,7 @@ after(async () => {
   );
 });
 
-test("product with stock movement history is deactivated rather than deleted", async () => {
+test("product referenced by historical orders is deactivated rather than deleted", async () => {
   resetState([{ id: 9 }]);
   installPrismaMocks();
   const baseUrl = await createAppServer();
@@ -87,8 +84,6 @@ test("product with stock movement history is deactivated rather than deleted", a
 
   assert.equal(response.status, 200);
   assert.equal(products.get(41).isActive, false);
-  assert.equal(products.get(41).stock, 0);
-  assert.equal(products.get(41).lowStockThreshold, 0);
   assert.deepEqual(deletedProductIds, []);
 });
 

@@ -41,8 +41,6 @@ router.get("/", async (req, res) => {
     const normalizedProducts = products.map((product) => ({
       ...product,
       price: Number(product.price),
-      stock: Number(product.stock),
-      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
       isVegetarian: Boolean(product.isVegetarian),
       isSignature: Boolean(product.isSignature),
       variants: product.variants.map((variant) => ({
@@ -50,7 +48,6 @@ router.get("/", async (req, res) => {
         name: variant.name,
         price: Number(variant.price),
       })),
-      isAvailable: product.stock > 0,
     }));
 
     normalizedProducts.sort(
@@ -102,8 +99,6 @@ router.get("/:id", async (req, res) => {
     return res.json({
       ...product,
       price: Number(product.price),
-      stock: Number(product.stock),
-      lowStockThreshold: Number(product.lowStockThreshold ?? 0),
       isVegetarian: Boolean(product.isVegetarian),
       isSignature: Boolean(product.isSignature),
       variants: product.variants.map((variant) => ({
@@ -111,7 +106,6 @@ router.get("/:id", async (req, res) => {
         name: variant.name,
         price: Number(variant.price),
       })),
-      isAvailable: product.stock > 0,
     });
   } catch (error) {
     console.error("Error fetching product:", error);

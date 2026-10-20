@@ -349,7 +349,7 @@ async function main() {
           data,
         })
       : await prisma.product.create({
-          data: { ...data, stock: 0 },
+          data,
         });
     if (existing) updatedProducts += 1;
     else createdProducts += 1;
@@ -419,7 +419,6 @@ async function main() {
       activeVariantsPresent: activeVariantCount,
       createdVariants,
       updatedVariants,
-      preservedStock: true,
     }),
   );
 }

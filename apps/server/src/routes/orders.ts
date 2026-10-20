@@ -169,12 +169,6 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
         }
       }
 
-      if (product.stock < quantity) {
-        return res.status(400).json({
-          message: `Insufficient stock for ${product.name}`,
-        });
-      }
-
       const unitPriceMinor = toMinorUnits(
         String(variant?.price ?? product.price),
         `Price for ${product.name}${variant ? ` (${variant.name})` : ""}`,
@@ -231,46 +225,6 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
           409,
           "An active order already exists for this table",
         );
-      }
-
-      for (const item of newItems) {
-        const stockUpdate = await tx.product.updateMany({
-          where: {
-            id: item.productId,
-            isActive: true,
-            stock: {
-              gte: item.quantity,
-            },
-          },
-          data: {
-            stock: {
-              decrement: item.quantity,
-            },
-          },
-        });
-
-        if (stockUpdate.count === 0) {
-          const product = await tx.product.findUnique({
-            where: {
-              id: item.productId,
-            },
-            select: {
-              name: true,
-            },
-          });
-
-          if (!product) {
-            throw new OrderRequestError(
-              404,
-              `Product ${item.productId} not found`,
-            );
-          }
-
-          throw new OrderRequestError(
-            400,
-            `Insufficient stock for ${product.name}`,
-          );
-        }
       }
 
       const order = await tx.order.create({
@@ -584,35 +538,6 @@ router.patch(
             }
           }
 
-          if (product.stock < quantity) {
-            throw new OrderRequestError(
-              400,
-              `Insufficient stock for ${product.name}`,
-            );
-          }
-
-          const stockUpdate = await tx.product.updateMany({
-            where: {
-              id: productId,
-              isActive: true,
-              stock: {
-                gte: quantity,
-              },
-            },
-            data: {
-              stock: {
-                decrement: quantity,
-              },
-            },
-          });
-
-          if (stockUpdate.count === 0) {
-            throw new OrderRequestError(
-              400,
-              `Insufficient stock for ${product.name}`,
-            );
-          }
-
           const unitPriceMinor = toMinorUnits(
             String(variant?.price ?? product.price),
             `Price for ${product.name}${variant ? ` (${variant.name})` : ""}`,
@@ -909,13 +834,6 @@ router.patch(
         }
         if (currentOrder.status === "CANCELLED") {
           throw new OrderRequestError(409, "Order is already cancelled");
-        }
-
-        for (const item of currentOrder.items) {
-          await tx.product.update({
-            where: { id: item.productId },
-            data: { stock: { increment: item.quantity } },
-          });
         }
 
         const cancelledOrder = await tx.order.update({

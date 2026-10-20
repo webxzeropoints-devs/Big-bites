@@ -92,15 +92,11 @@ model Product {
   name               String
   description        String                @default("")
   price              Decimal               @db.Decimal(10, 2)
-  stock              Int                   @default(0)
-  stockUnit          String                @default("pcs")
-  lowStockThreshold  Int                   @default(0)
   isVegetarian       Boolean               @default(true)
   classification     ProductClassification @default(VEG)
   subcategory        String?
   isSignature        Boolean               @default(false)
   isActive           Boolean               @default(true)
-  lastStockUpdatedAt DateTime?
   createdAt          DateTime              @default(now())
   updatedAt          DateTime              @updatedAt
 
@@ -109,7 +105,6 @@ model Product {
 
   variants       ProductVariant[]
   orderItems     OrderItem[]
-  stockMovements ProductStockMovement[]
 }
 
 model ProductVariant {
@@ -126,18 +121,6 @@ model ProductVariant {
   orderItems OrderItem[]
 
   @@unique([productId, name])
-}
-
-model ProductStockMovement {
-  id            Int      @id @default(autoincrement())
-  productId     Int
-  product       Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
-  movementType  String   @default("ADJUSTMENT")
-  quantity      Int
-  previousStock Int
-  newStock      Int
-  reason        String   @default("")
-  createdAt     DateTime @default(now())
 }
 
 model Order {

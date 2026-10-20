@@ -233,8 +233,8 @@ test(`POST /api/orders persists a table order as the authenticated admin (${rout
   assert.equal(createdOrders.length, 1);
   assert.equal(body.order.id, 1);
   assert.equal(orderSequenceResetCount, 1);
-  assert.equal(products.get(41).stock, 6);
-  assert.equal(products.get(42).stock, 5);
+  assert.equal(products.get(41).stock, 8);
+  assert.equal(products.get(42).stock, 6);
   assert.equal(tables.get(1).status, "OCCUPIED");
 
   const duplicate = await requestOrder(baseUrl, {
@@ -246,7 +246,7 @@ test(`POST /api/orders persists a table order as the authenticated admin (${rout
   });
   assert.equal(duplicate.status, 409);
   assert.equal(createdOrders.length, 1);
-  assert.equal(products.get(41).stock, 6);
+  assert.equal(products.get(41).stock, 8);
 });
 
 test(`POST /api/orders prices and records the selected product variant (${routePath})`, async () => {
@@ -279,7 +279,7 @@ test(`POST /api/orders prices and records the selected product variant (${routeP
     unitPrice: "21.25",
     subtotal: "42.50",
   });
-  assert.equal(products.get(41).stock, 6);
+  assert.equal(products.get(41).stock, 8);
 });
 
 test(`POST /api/orders persists a parcel order as the authenticated waiter, ignoring submitted identity (${routePath})`, async () => {
@@ -305,11 +305,11 @@ test(`POST /api/orders persists a parcel order as the authenticated waiter, igno
     [{ productId: 41, quantity: 3 }],
   );
   assert.equal(createdOrders.length, 1);
-  assert.equal(products.get(41).stock, 5);
+  assert.equal(products.get(41).stock, 8);
   assert.equal(tables.get(2).status, "AVAILABLE");
 });
 
-test(`PATCH /api/orders/:id/add-items uses exact line totals and stock (${routePath})`, async () => {
+test(`PATCH /api/orders/:id/add-items uses exact line totals without stock limits (${routePath})`, async () => {
   resetMockData();
   installPrismaMocks();
   const baseUrl = await createAppServer();
@@ -357,11 +357,11 @@ test(`PATCH /api/orders/:id/add-items uses exact line totals and stock (${routeP
     ],
   );
   assert.equal(body.order.payment.amount, "40.50");
-  assert.equal(products.get(41).stock, 5);
-  assert.equal(products.get(42).stock, 5);
+  assert.equal(products.get(41).stock, 8);
+  assert.equal(products.get(42).stock, 6);
 });
 
-test(`PATCH /api/orders/:id/cancel retains history, restores stock and frees the table (${routePath})`, async () => {
+test(`PATCH /api/orders/:id/cancel retains history and frees the table (${routePath})`, async () => {
   resetMockData();
   installPrismaMocks();
   const baseUrl = await createAppServer();
@@ -379,7 +379,7 @@ test(`PATCH /api/orders/:id/cancel retains history, restores stock and frees the
   });
   assert.equal(created.status, 201);
   const { order } = await created.json();
-  assert.equal(products.get(41).stock, 6);
+  assert.equal(products.get(41).stock, 8);
 
   const otherWaiterToken = createToken({
     id: 4,
@@ -396,7 +396,7 @@ test(`PATCH /api/orders/:id/cancel retains history, restores stock and frees the
     otherWaiterToken,
   );
   assert.equal(forbiddenByOwnership.status, 403);
-  assert.equal(products.get(41).stock, 6);
+  assert.equal(products.get(41).stock, 8);
 
   const response = await requestCancel(baseUrl, order.id, waiterToken);
   assert.equal(response.status, 200);
@@ -407,7 +407,7 @@ test(`PATCH /api/orders/:id/cancel retains history, restores stock and frees the
   assert.equal(tables.get(1).status, "AVAILABLE");
 });
 
-test(`PATCH /api/orders/:id/cancel rejects paid orders without changing stock or table (${routePath})`, async () => {
+test(`PATCH /api/orders/:id/cancel rejects paid orders without changing table (${routePath})`, async () => {
   resetMockData();
   installPrismaMocks();
   const baseUrl = await createAppServer();
@@ -429,11 +429,11 @@ test(`PATCH /api/orders/:id/cancel rejects paid orders without changing stock or
   const response = await requestCancel(baseUrl, order.id, waiterToken);
   assert.equal(response.status, 409);
   assert.equal(createdOrders[0].status, "CONFIRMED");
-  assert.equal(products.get(41).stock, 7);
+  assert.equal(products.get(41).stock, 8);
   assert.equal(tables.get(1).status, "OCCUPIED");
 });
 
-test(`POST /api/orders enforces authentication, roles, validation, and stock errors (${routePath})`, async () => {
+test(`POST /api/orders enforces authentication and validation while allowing unlimited quantities (${routePath})`, async () => {
   resetMockData();
   installPrismaMocks();
   const baseUrl = await createAppServer();
@@ -461,11 +461,12 @@ test(`POST /api/orders enforces authentication, roles, validation, and stock err
   assert.equal(invalid.status, 400);
   assert.equal((await invalid.json()).message, "Invalid productId or quantity");
 
-  const insufficientStock = await requestOrder(baseUrl, {
+  const unlimitedQuantity = await requestOrder(baseUrl, {
     token: createToken({ id: 1, username: "admin", role: "ADMIN" }),
-    payload: { tableId: 1, items: [{ productId: 41, quantity: 9 }] },
+    payload: { tableId: 1, items: [{ productId: 41, quantity: 100 }] },
   });
-  assert.equal(insufficientStock.status, 400);
-  assert.match((await insufficientStock.json()).message, /Insufficient stock/);
-  assert.equal(createdOrders.length, 0);
+  assert.equal(unlimitedQuantity.status, 201);
+  assert.equal((await unlimitedQuantity.json()).order.items[0].quantity, 100);
+  assert.equal(products.get(41).stock, 8);
+  assert.equal(createdOrders.length, 1);
 });
