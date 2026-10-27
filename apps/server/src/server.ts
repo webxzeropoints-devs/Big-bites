@@ -17,7 +17,7 @@ validateAuthSecret();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = "0.0.0.0";
+const HOST = process.env.HOST || "0.0.0.0";
 const DISCOVERY_PORT = Number(process.env.DISCOVERY_PORT) || 3001;
 const DISCOVERY_REQUEST = "BIGBITES_POS_DISCOVERY_V1";
 
@@ -72,7 +72,11 @@ function getLanIPv4(clientAddress?: string) {
 }
 const discoverySocket = createSocket("udp4");
 discoverySocket.on("error", (error) => {
-  console.error("LAN discovery socket error:", error);
+  console.error(
+    "LAN discovery could not bind its UDP port; the local server cannot start:",
+    error,
+  );
+  process.exit(1);
 });
 discoverySocket.on("message", (message, remote) => {
   if (message.toString("utf8") !== DISCOVERY_REQUEST) return;

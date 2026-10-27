@@ -299,6 +299,12 @@ router.get("/order-reports", async (_req, res) => {
 });
 
 router.post("/catalog/sync", async (_req, res) => {
+  if (process.env.BIGBITES_ENABLE_PRODUCTION_CATALOG_SYNC !== "true") {
+    return res.status(409).json({
+      message: "Production menu sync is disabled for this local POS server",
+    });
+  }
+
   if (!usesInstalledLocalDatabase()) {
     return res.status(409).json({
       message:
@@ -771,6 +777,7 @@ router.get("/products", async (_req, res) => {
     return res.status(500).json({ message: "Unable to load menu" });
   }
 });
+
 router.post("/products", async (req, res) => {
   const name = text(req.body.name);
   const categoryId = id(req.body.categoryId);
@@ -904,6 +911,12 @@ router.patch("/products/:id", async (req, res) => {
   }
   try {
     const product = await prisma.$transaction(async (tx) => {
+      const existing = await tx.product.findUnique({
+        where: { id: productId },
+      });
+      if (!existing) {
+        throw new Error("PRODUCT_NOT_FOUND");
+      }
       await tx.product.update({
         where: { id: productId },
         data,
@@ -943,7 +956,16 @@ router.patch("/products/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("Update product error:", error);
-    return res.status(404).json({ message: "Product or category not found" });
+    if (error instanceof Error && error.message === "PRODUCT_NOT_FOUND") {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      (error.code === "P2003" || error.code === "P2025")
+    ) {
+      return res.status(404).json({ message: "Product or category not found" });
+    }
+    return res.status(500).json({ message: "Unable to update product" });
   }
 });
 router.delete("/products/:id", async (req, res) => {
@@ -969,13 +991,31 @@ router.delete("/products/:id", async (req, res) => {
         },
       });
       return res.status(200).json({
-        message: "This product is still referenced by historical orders, so it was deactivated instead of permanently deleted.",
+        message: "This product has historical order records, so it was deactivated instead of permanently deleted.",
         product: deactivated,
       });
     }
 
-    await prisma.product.delete({ where: { id: productId } });
-    return res.status(204).send();
+    try {
+      await prisma.product.delete({ where: { id: productId } });
+      return res.status(204).send();
+    } catch (error) {
+      if (
+        !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+        error.code !== "P2003"
+      ) {
+        throw error;
+      }
+
+      const deactivated = await prisma.product.update({
+        where: { id: productId },
+        data: { isActive: false },
+      });
+      return res.status(200).json({
+        message: "This product has historical records, so it was deactivated instead of permanently deleted.",
+        product: deactivated,
+      });
+    }
   } catch (error) {
     console.error("Delete product error:", error);
     return res.status(400).json({ message: "Unable to delete product" });

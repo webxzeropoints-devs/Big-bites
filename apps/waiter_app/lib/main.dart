@@ -1,9 +1,58 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'services/api_service.dart';
 import 'utils/currency.dart';
 
+const _legacyVariantProducts = <String, List<String>>{
+  'grill half': ['Grill', 'Half'],
+  'grill full': ['Grill', 'Full'],
+  'pepper bbq quarter': ['Pepper BBQ', 'Quarter'],
+  'pepper bbq half': ['Pepper BBQ', 'Half'],
+  'pepper bbq full': ['Pepper BBQ', 'Full'],
+  'plain bbq quarter': ['Plain BBQ', 'Quarter'],
+  'plain bbq half': ['Plain BBQ', 'Half'],
+  'plain bbq full': ['Plain BBQ', 'Full'],
+};
+
+String _normalizeMenuName(String value) => value
+    .trim()
+    .replaceAll(RegExp(r'\s*-\s*'), ' ')
+    .replaceAll(RegExp(r'\s+'), ' ')
+    .toLowerCase();
+
+bool _isRedundantVariantProduct(
+  Map<String, dynamic> product,
+  List<dynamic> allProducts,
+) {
+  final legacy =
+      _legacyVariantProducts[_normalizeMenuName(
+        product['name']?.toString() ?? '',
+      )];
+  if (legacy == null) return false;
+
+  final categoryId = (product['categoryId'] as num?)?.toInt();
+  return allProducts.any((rawCandidate) {
+    final candidate = Map<String, dynamic>.from(rawCandidate);
+    final variants = candidate['variants'];
+    return candidate['id'] != product['id'] &&
+        (candidate['categoryId'] as num?)?.toInt() == categoryId &&
+        _normalizeMenuName(candidate['name']?.toString() ?? '') ==
+            _normalizeMenuName(legacy[0]) &&
+        variants is List &&
+        variants.any(
+          (rawVariant) =>
+              _normalizeMenuName(
+                Map<String, dynamic>.from(rawVariant)['name']?.toString() ?? '',
+              ) ==
+              _normalizeMenuName(legacy[1]),
+        );
+  });
+}
+
 void main() {
+  ApiService.startReconnectMonitor();
   runApp(const HotelWaiterApp());
 }
 
@@ -42,21 +91,27 @@ class _LoginScreenState extends State<LoginScreen> {
 
   bool loading = false;
   bool obscurePassword = true;
-  bool checkingBackend = true;
+  bool checkingBackend = false;
   bool serverReady = false;
   String serverStatus = 'Connecting to the BIG BITES server...';
+  Timer? backendRetryTimer;
 
   @override
   void initState() {
     super.initState();
     checkBackend();
+    backendRetryTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!checkingBackend) checkBackend();
+    });
   }
 
   Future<void> checkBackend() async {
+    if (checkingBackend) return;
     setState(() {
       checkingBackend = true;
-      serverReady = false;
-      serverStatus = 'Connecting to the BIG BITES server...';
+      if (!serverReady) {
+        serverStatus = 'Connecting to the BIG BITES server...';
+      }
     });
     try {
       final serverUrl = await ApiService.checkBackend();
@@ -68,6 +123,7 @@ class _LoginScreenState extends State<LoginScreen> {
     } catch (error) {
       if (!mounted) return;
       setState(() {
+        serverReady = false;
         serverStatus = error.toString().replaceFirst('Exception: ', '');
       });
     } finally {
@@ -78,6 +134,9 @@ class _LoginScreenState extends State<LoginScreen> {
       }
     }
   }
+
+  bool _isSupportedWaiterRole(String? role) =>
+      role == 'WAITER' || role == 'ADMIN';
 
   Future<void> login() async {
     if (!serverReady) {
@@ -105,17 +164,38 @@ class _LoginScreenState extends State<LoginScreen> {
 
     try {
       final result = await ApiService.login(username, password);
-
       final data = result['data'];
 
+      if (data is! Map) {
+        throw Exception('The server returned an invalid login response');
+      }
+
+      final userMap = data['user'];
+      final role = userMap is Map ? userMap['role']?.toString() : null;
+      final token = data['token']?.toString();
+
       if (!mounted) return;
+
+      if (token == null || token.isEmpty) {
+        throw Exception('The server did not return a valid login token');
+      }
+
+      if (!_isSupportedWaiterRole(role)) {
+        throw Exception(
+          role == null
+              ? 'This app is only available to WAITER and ADMIN accounts.'
+              : 'This app is for WAITER or ADMIN accounts only. Your role is $role.',
+        );
+      }
 
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
           builder: (_) => TableScreen(
-            user: Map<String, dynamic>.from(data['user']),
-            token: data['token'].toString(),
+            user: userMap is Map
+                ? Map<String, dynamic>.from(userMap)
+                : const <String, dynamic>{},
+            token: token,
           ),
         ),
       );
@@ -136,6 +216,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   void dispose() {
+    backendRetryTimer?.cancel();
     usernameController.dispose();
     passwordController.dispose();
     super.dispose();
@@ -564,6 +645,7 @@ class _MenuScreenState extends State<MenuScreen> {
   bool loading = true;
   bool submitting = false;
   bool sendingToCashier = false;
+  bool cancellingOrder = false;
 
   String? error;
 
@@ -590,6 +672,7 @@ class _MenuScreenState extends State<MenuScreen> {
       setState(() {
         categories = results[0];
         products = results[1];
+        selectedCategoryId = null;
         for (final rawProduct in products) {
           final product = Map<String, dynamic>.from(rawProduct);
           final variants = product['variants'];
@@ -627,19 +710,9 @@ class _MenuScreenState extends State<MenuScreen> {
   String quantityKey(int productId, int? variantId) =>
       '$productId:${variantId ?? ''}';
 
-  int productQuantity(int productId) {
-    return quantities.entries
-        .where((entry) => entry.key.startsWith('$productId:'))
-        .fold(0, (sum, entry) => sum + entry.value);
-  }
-
-  void increaseQuantity(int productId, int? variantId, int stock) {
+  void increaseQuantity(int productId, int? variantId) {
     final key = quantityKey(productId, variantId);
     final current = quantities[key] ?? 0;
-
-    if (productQuantity(productId) >= stock) {
-      return;
-    }
 
     setState(() {
       quantities[key] = current + 1;
@@ -706,6 +779,61 @@ class _MenuScreenState extends State<MenuScreen> {
     }
 
     return items;
+  }
+
+  Future<void> cancelOrder() async {
+    if (cancellingOrder) return;
+
+    final orderId = widget.existingOrderId;
+    if (orderId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to identify the active order')),
+      );
+      return;
+    }
+
+    setState(() {
+      cancellingOrder = true;
+    });
+
+    try {
+      final result = await ApiService.cancelOrder(
+        orderId: orderId,
+        token: widget.token,
+      );
+      final statusCode = result['statusCode'] as int;
+      final data = result['data'];
+      if (statusCode < 200 || statusCode >= 300) {
+        throw Exception(
+          data is Map && data['message'] is String
+              ? data['message']
+              : 'Failed to cancel order',
+        );
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Order #$orderId cancelled'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          cancellingOrder = false;
+        });
+      }
+    }
   }
 
   Future<void> sendToCashier() async {
@@ -865,8 +993,6 @@ class _MenuScreenState extends State<MenuScreen> {
 
     final name = product['name']?.toString() ?? 'Unknown';
 
-    final stock = (product['stock'] as num?)?.toInt() ?? 0;
-
     final variants = product['variants'] is List
         ? (product['variants'] as List)
               .map((variant) => Map<String, dynamic>.from(variant))
@@ -882,8 +1008,6 @@ class _MenuScreenState extends State<MenuScreen> {
     final classification =
         product['classification']?.toString() ??
         (product['isVegetarian'] == true ? 'VEG' : 'NON_VEG');
-
-    final isOutOfStock = stock <= 0;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -945,14 +1069,6 @@ class _MenuScreenState extends State<MenuScreen> {
                     formatMinorUnits(price),
                     style: TextStyle(fontSize: 15, color: Colors.grey.shade700),
                   ),
-                  const SizedBox(height: 3),
-                  Text(
-                    isOutOfStock ? 'OUT OF STOCK' : 'Stock: $stock',
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: isOutOfStock ? Colors.red : Colors.grey.shade600,
-                    ),
-                  ),
                 ],
               ),
             ),
@@ -976,13 +1092,8 @@ class _MenuScreenState extends State<MenuScreen> {
                   ),
                 ),
                 IconButton(
-                  onPressed: isOutOfStock || productQuantity(productId) >= stock
-                      ? null
-                      : () => increaseQuantity(
-                          productId,
-                          selectedVariantId,
-                          stock,
-                        ),
+                  onPressed: () =>
+                      increaseQuantity(productId, selectedVariantId),
                   icon: const Icon(Icons.add_circle_outline),
                 ),
               ],
@@ -999,22 +1110,70 @@ class _MenuScreenState extends State<MenuScreen> {
   Widget build(BuildContext context) {
     final title = widget.existingOrder ? 'Add More Food' : 'New Order';
     final query = searchController.text.trim().toLowerCase();
-    final visibleProducts = products.where((rawProduct) {
-      final product = Map<String, dynamic>.from(rawProduct);
-      final category = Map<String, dynamic>.from(
-        product['category'] as Map? ?? const {},
-      );
-      if (selectedCategoryId != null &&
-          (category['id'] as num?)?.toInt() != selectedCategoryId) {
-        return false;
-      }
-      if (query.isEmpty) return true;
-      return [
-        product['name']?.toString() ?? '',
-        product['subcategory']?.toString() ?? '',
-        category['name']?.toString() ?? '',
-      ].join(' ').toLowerCase().contains(query);
-    }).toList();
+    final visibleProducts =
+        products.where((rawProduct) {
+          final product = Map<String, dynamic>.from(rawProduct);
+          final category = Map<String, dynamic>.from(
+            product['category'] as Map? ?? const {},
+          );
+          final categoryId =
+              (product['categoryId'] as num?)?.toInt() ??
+              (category['id'] as num?)?.toInt();
+          if (selectedCategoryId != null && categoryId != selectedCategoryId) {
+            return false;
+          }
+          if (_isRedundantVariantProduct(product, products)) return false;
+          if (query.isEmpty) return true;
+          return [
+            product['name']?.toString() ?? '',
+            product['subcategory']?.toString() ?? '',
+            category['name']?.toString() ?? '',
+          ].join(' ').toLowerCase().contains(query);
+        }).toList()..sort((rawLeft, rawRight) {
+          final left = Map<String, dynamic>.from(rawLeft);
+          final right = Map<String, dynamic>.from(rawRight);
+          final leftCategory = Map<String, dynamic>.from(
+            left['category'] as Map? ?? const {},
+          );
+          final rightCategory = Map<String, dynamic>.from(
+            right['category'] as Map? ?? const {},
+          );
+          final leftOrder =
+              (leftCategory['sortOrder'] as num?)?.toInt() ?? 0x7fffffff;
+          final rightOrder =
+              (rightCategory['sortOrder'] as num?)?.toInt() ?? 0x7fffffff;
+          var comparison = leftOrder.compareTo(rightOrder);
+          if (comparison != 0) return comparison;
+          comparison = (leftCategory['name']?.toString() ?? '')
+              .toLowerCase()
+              .compareTo(
+                (rightCategory['name']?.toString() ?? '').toLowerCase(),
+              );
+          if (comparison != 0) return comparison;
+          comparison = (left['name']?.toString() ?? '').toLowerCase().compareTo(
+            (right['name']?.toString() ?? '').toLowerCase(),
+          );
+          if (comparison != 0) return comparison;
+          return ((left['id'] as num?)?.toInt() ?? 0).compareTo(
+            (right['id'] as num?)?.toInt() ?? 0,
+          );
+        });
+    final orderedCategories = List<dynamic>.from(categories)
+      ..sort((rawLeft, rawRight) {
+        final left = Map<String, dynamic>.from(rawLeft);
+        final right = Map<String, dynamic>.from(rawRight);
+        final leftOrder = (left['sortOrder'] as num?)?.toInt() ?? 0x7fffffff;
+        final rightOrder = (right['sortOrder'] as num?)?.toInt() ?? 0x7fffffff;
+        final comparison = leftOrder.compareTo(rightOrder);
+        if (comparison != 0) return comparison;
+        final nameComparison = (left['name']?.toString() ?? '')
+            .toLowerCase()
+            .compareTo((right['name']?.toString() ?? '').toLowerCase());
+        if (nameComparison != 0) return nameComparison;
+        return ((left['id'] as num?)?.toInt() ?? 0).compareTo(
+          (right['id'] as num?)?.toInt() ?? 0,
+        );
+      });
     final orderSentToCashier =
         widget.existingOrder && widget.existingOrderStatus != 'CONFIRMED';
 
@@ -1058,7 +1217,7 @@ class _MenuScreenState extends State<MenuScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'This order can no longer be changed. The table will be available after payment.',
+                      'No more items can be added. The table will be available after payment or cancellation.',
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -1120,7 +1279,7 @@ class _MenuScreenState extends State<MenuScreen> {
                                     ),
                                   ),
                                 ),
-                                ...categories.map((rawCategory) {
+                                ...orderedCategories.map((rawCategory) {
                                   final category = Map<String, dynamic>.from(
                                     rawCategory,
                                   );
@@ -1141,10 +1300,12 @@ class _MenuScreenState extends State<MenuScreen> {
                           );
                         }
                         if (visibleProducts.isEmpty) {
-                          return const Padding(
-                            padding: EdgeInsets.all(24),
+                          return Padding(
+                            padding: const EdgeInsets.all(24),
                             child: Center(
-                              child: Text('No menu items match this filter'),
+                              child: Text(
+                                'No menu items match this category or search',
+                              ),
                             ),
                           );
                         }
@@ -1168,70 +1329,123 @@ class _MenuScreenState extends State<MenuScreen> {
                     BoxShadow(blurRadius: 8, offset: Offset(0, -2)),
                   ],
                 ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final narrow = constraints.maxWidth < 380;
+                    final total = Row(
+                      children: [
+                        Expanded(
+                          child: Text(
                             widget.existingOrder ? 'ORDER TOTAL' : 'TOTAL',
                             style: const TextStyle(fontSize: 12),
                           ),
-                          Text(
-                            formatMinorUnits(orderTotal),
-                            style: const TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                            ),
+                        ),
+                        Text(
+                          formatMinorUnits(orderTotal),
+                          style: const TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
                           ),
-                        ],
+                        ),
+                      ],
+                    );
+                    final confirmButton = FilledButton.icon(
+                      onPressed: submitting ? null : submitOrder,
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 48),
                       ),
-                    ),
-                    if (widget.existingOrder)
-                      Column(
+                      icon: submitting
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.check),
+                      label: const Text('CONFIRM ORDER'),
+                    );
+
+                    if (!widget.existingOrder) {
+                      return Column(
                         mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          FilledButton(
-                            onPressed: submitting || sendingToCashier
-                                ? null
-                                : submitOrder,
-                            child: const Text('ADD FOOD'),
-                          ),
-                          const SizedBox(height: 6),
-                          OutlinedButton(
-                            onPressed: submitting || sendingToCashier
-                                ? null
-                                : sendToCashier,
-                            child: sendingToCashier
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Text('SEND TO CASHIER'),
-                          ),
+                          total,
+                          const SizedBox(height: 8),
+                          confirmButton,
                         ],
-                      )
-                    else
-                      FilledButton.icon(
-                        onPressed: submitting ? null : submitOrder,
-                        icon: submitting
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Icon(Icons.check),
-                        label: const Text('CONFIRM ORDER'),
+                      );
+                    }
+
+                    final addFoodButton = FilledButton(
+                      onPressed: submitting || sendingToCashier
+                          ? null
+                          : submitOrder,
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(0, 48),
                       ),
-                  ],
+                      child: const Text('ADD FOOD'),
+                    );
+                    final sendButton = OutlinedButton(
+                      onPressed:
+                          submitting || sendingToCashier || cancellingOrder
+                          ? null
+                          : sendToCashier,
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size(0, 48),
+                      ),
+                      child: sendingToCashier
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('SEND TO CASHIER'),
+                    );
+                    final cancelButton = TextButton.icon(
+                      onPressed:
+                          submitting || sendingToCashier || cancellingOrder
+                          ? null
+                          : cancelOrder,
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.red.shade700,
+                        minimumSize: const Size(0, 48),
+                      ),
+                      icon: cancellingOrder
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.cancel_outlined),
+                      label: const Text('CANCEL ORDER'),
+                    );
+
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        total,
+                        const SizedBox(height: 8),
+                        addFoodButton,
+                        const SizedBox(height: 6),
+                        if (narrow) ...[
+                          sendButton,
+                          const SizedBox(height: 6),
+                          cancelButton,
+                        ] else
+                          Row(
+                            children: [
+                              Expanded(child: sendButton),
+                              const SizedBox(width: 8),
+                              Expanded(child: cancelButton),
+                            ],
+                          ),
+                      ],
+                    );
+                  },
                 ),
               ),
             ),

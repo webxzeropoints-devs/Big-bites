@@ -60,14 +60,27 @@ async function main() {
   console.log("✅ 8 tables and Parcel option created");
 
   // -----------------------------
-  // 2. Create categories
+  // 2. Clear order history and bill data to keep the menu update controlled
+  // -----------------------------
+  await prisma.$transaction(async (tx) => {
+    await tx.payment.deleteMany({});
+    await tx.order.deleteMany({});
+    await tx.$queryRaw`SELECT setval(pg_get_serial_sequence('"Order"', 'id'), 1, false)`;
+  });
+
+  console.log("✅ Existing orders and bill history reset");
+
+  // -----------------------------
+  // 3. Create categories
   // -----------------------------
   const categories = [
-    "Biryani",
-    "Rice",
-    "Starters",
-    "Bread",
-    "Drinks",
+    "SOUPS",
+    "STARTERS (VEG)",
+    "STARTERS (NON VEG)",
+    "CHUKKA",
+    "KEBAB",
+    "BBQ & GRILL",
+    "INDIAN GRAVY (VEG)",
   ];
 
   const categoryRecords: Record<string, number> = {};
@@ -82,99 +95,122 @@ async function main() {
     categoryRecords[name] = category.id;
   }
 
-  console.log("✅ Categories created");
+  const desiredProductNames = new Set<string>();
 
   // -----------------------------
-  // 3. Create food products
+  // 4. Create food products
   // -----------------------------
   const products = [
-    {
-      name: "Chicken Biryani",
-      price: 180,
-      stock: 100,
-      category: "Biryani",
-    },
-    {
-      name: "Mutton Biryani",
-      price: 240,
-      stock: 50,
-      category: "Biryani",
-    },
-    {
-      name: "Chicken Rice",
-      price: 140,
-      stock: 100,
-      category: "Rice",
-    },
-    {
-      name: "Veg Fried Rice",
-      price: 110,
-      stock: 80,
-      category: "Rice",
-    },
-    {
-      name: "Chicken 65",
-      price: 160,
-      stock: 75,
-      category: "Starters",
-    },
-    {
-      name: "Paneer 65",
-      price: 140,
-      stock: 60,
-      category: "Starters",
-    },
-    {
-      name: "Parotta",
-      price: 25,
-      stock: 100,
-      category: "Bread",
-    },
-    {
-      name: "Butter Naan",
-      price: 45,
-      stock: 80,
-      category: "Bread",
-    },
-    {
-      name: "Coke",
-      price: 40,
-      stock: 100,
-      category: "Drinks",
-    },
-    {
-      name: "Fresh Lime",
-      price: 50,
-      stock: 100,
-      category: "Drinks",
-    },
+    { name: "Veg Clear Soup", price: 60, category: "SOUPS" },
+    { name: "Sweet Corn Soup", price: 80, category: "SOUPS" },
+    { name: "Hot & Sour Veg Soup", price: 80, category: "SOUPS" },
+    { name: "Noodles Soup", price: 80, category: "SOUPS" },
+    { name: "Manchow Soup", price: 80, category: "SOUPS" },
+    { name: "Chicken Clear Soup", price: 80, category: "SOUPS" },
+    { name: "Chicken Manchow Soup", price: 90, category: "SOUPS" },
+    { name: "Hot & Sour Chicken Soup", price: 90, category: "SOUPS" },
+    { name: "Chicken Pepper Soup", price: 90, category: "SOUPS" },
+    { name: "Mutton Soup", price: 100, category: "SOUPS" },
+    { name: "Prawn Soup", price: 100, category: "SOUPS" },
+    { name: "Paneer 65", price: 150, category: "STARTERS (VEG)" },
+    { name: "Mushroom 65", price: 130, category: "STARTERS (VEG)" },
+    { name: "Gobi 65", price: 130, category: "STARTERS (VEG)" },
+    { name: "Crispy Potato", price: 130, category: "STARTERS (VEG)" },
+    { name: "Paneer Manchurian", price: 180, category: "STARTERS (VEG)" },
+    { name: "Chilli Paneer", price: 180, category: "STARTERS (VEG)" },
+    { name: "Mushroom Manchurian", price: 150, category: "STARTERS (VEG)" },
+    { name: "Chilli Mushroom", price: 150, category: "STARTERS (VEG)" },
+    { name: "Gobi Manchurian", price: 160, category: "STARTERS (VEG)" },
+    { name: "Chilli Gobi", price: 150, category: "STARTERS (VEG)" },
+    { name: "Chicken 65 (6 Pc)", price: 160, category: "STARTERS (NON VEG)" },
+    { name: "Lollipop (Sauce)", price: 170, category: "STARTERS (NON VEG)" },
+    { name: "Lollipop (Dry)", price: 160, category: "STARTERS (NON VEG)" },
+    { name: "Chilli Chicken", price: 180, category: "STARTERS (NON VEG)" },
+    { name: "Chicken Manchurian", price: 180, category: "STARTERS (NON VEG)" },
+    { name: "Dragon Chicken", price: 190, category: "STARTERS (NON VEG)" },
+    { name: "Honey Chilli Chicken", price: 180, category: "STARTERS (NON VEG)" },
+    { name: "Lemon Chicken", price: 180, category: "STARTERS (NON VEG)" },
+    { name: "Ginger Chicken", price: 180, category: "STARTERS (NON VEG)" },
+    { name: "Garlic Chicken", price: 180, category: "STARTERS (NON VEG)" },
+    { name: "Crispy Chicken", price: 190, category: "STARTERS (NON VEG)" },
+    { name: "Karam Chicken", price: 180, category: "STARTERS (NON VEG)" },
+    { name: "Prawn Manchurian", price: 200, category: "STARTERS (NON VEG)" },
+    { name: "Fish Manchurian", price: 200, category: "STARTERS (NON VEG)" },
+    { name: "Chilli Fish", price: 200, category: "STARTERS (NON VEG)" },
+    { name: "Honey Wings", price: 200, category: "STARTERS (NON VEG)" },
+    { name: "Chicken Pepper Fry", price: 180, category: "CHUKKA" },
+    { name: "Mutton Pepper Fry", price: 250, category: "CHUKKA" },
+    { name: "Prawn Pepper Fry", price: 200, category: "CHUKKA" },
+    { name: "Chicken Chukka", price: 180, category: "CHUKKA" },
+    { name: "Mutton Chukka", price: 250, category: "CHUKKA" },
+    { name: "Lasuni Kebab", price: 160, category: "KEBAB" },
+    { name: "Kali Mirch Kebab", price: 170, category: "KEBAB" },
+    { name: "Cheese Malai Kebab", price: 150, category: "KEBAB" },
+    { name: "Red Chilli Kebab", price: 170, category: "KEBAB" },
+    { name: "Golden Kebab", price: 180, category: "KEBAB" },
+    { name: "Malai Kebab", price: 150, category: "KEBAB" },
+    { name: "Chicken Tikka", price: 150, category: "KEBAB" },
+    { name: "Plain BBQ Quarter", price: 130, category: "BBQ & GRILL" },
+    { name: "Plain BBQ Half", price: 250, category: "BBQ & GRILL" },
+    { name: "Plain BBQ Full", price: 460, category: "BBQ & GRILL" },
+    { name: "Pepper BBQ Quarter", price: 140, category: "BBQ & GRILL" },
+    { name: "Pepper BBQ Half", price: 260, category: "BBQ & GRILL" },
+    { name: "Pepper BBQ Full", price: 470, category: "BBQ & GRILL" },
+    { name: "Grill Half", price: 250, category: "BBQ & GRILL" },
+    { name: "Grill Full", price: 450, category: "BBQ & GRILL" },
+    { name: "Paneer Butter Masala", price: 180, category: "INDIAN GRAVY (VEG)" },
+    { name: "Paneer Pepper Masala", price: 170, category: "INDIAN GRAVY (VEG)" },
+    { name: "Kadai Paneer Masala", price: 170, category: "INDIAN GRAVY (VEG)" },
+    { name: "Mushroom Masala", price: 150, category: "INDIAN GRAVY (VEG)" },
+    { name: "Alu Gobi Masala", price: 140, category: "INDIAN GRAVY (VEG)" },
+    { name: "Green Peas Masala", price: 140, category: "INDIAN GRAVY (VEG)" },
+    { name: "Paneer Tikka Masala", price: 190, category: "INDIAN GRAVY (VEG)" },
+    { name: "Dall Fry", price: 100, category: "INDIAN GRAVY (VEG)" },
   ];
 
   for (const product of products) {
-    await prisma.product.upsert({
-      where: {
-        id: (
-          await prisma.product.findFirst({
-            where: { name: product.name },
-            select: { id: true },
-          })
-        )?.id ?? -1,
-      },
-      update: {
-        price: product.price,
-        stock: product.stock,
-        isActive: true,
-        categoryId: categoryRecords[product.category],
-      },
-      create: {
+    desiredProductNames.add(product.name);
+
+    const existing = await prisma.product.findFirst({
+      where: { name: product.name },
+      select: { id: true },
+    });
+
+    if (existing) {
+      await prisma.product.update({
+        where: { id: existing.id },
+        data: {
+          price: product.price,          isActive: true,
+          categoryId: categoryRecords[product.category],
+        },
+      });
+      continue;
+    }
+
+    await prisma.product.create({
+      data: {
         name: product.name,
-        price: product.price,
-        stock: product.stock,
-        isActive: true,
+        price: product.price,        isActive: true,
         categoryId: categoryRecords[product.category],
       },
     });
   }
+
+  await prisma.product.deleteMany({
+    where: {
+      name: {
+        notIn: [...desiredProductNames],
+      },
+    },
+  });
+
+  await prisma.category.deleteMany({
+    where: {
+      name: {
+        notIn: categories,
+      },
+    },
+  });
 
   console.log("✅ Food products created");
 

@@ -8,9 +8,9 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { createPortal } from "react-dom";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
 import {
   calculateAmounts,
   calculateDiscountAmount,
@@ -20,12 +20,25 @@ import {
 } from "./utils/currency";
 import "./App.css";
 
-const API_URL =
-  ((import.meta.env.DEV && import.meta.env.VITE_API_URL) ||
-    "https://big-bites-server.onrender.com").replace(/\/$/, "");
+const API_URL = (
+  isTauri()
+    ? "http://127.0.0.1:3000"
+    : import.meta.env.VITE_API_URL || "http://127.0.0.1:3000"
+).replace(/\/$/, "");
+const PRODUCTION_CATALOG_SYNC_ENABLED =
+  import.meta.env.VITE_ENABLE_PRODUCTION_CATALOG_SYNC === "true";
 const ORDER_REPORTS_FOLDER_KEY = "big-bites-order-reports-folder";
 const RESTAURANT_NAME = "BIG BITES FAMILY RESTAURANT";
 const RECEIPT_RESTAURANT_NAME = "BIG BITES FAMILY\nRESTAURANT";
+
+async function confirmAction(
+  message: string,
+  options: { title: string; kind: "warning" },
+) {
+  if (isTauri()) return confirmDialog(message, options);
+  return window.confirm(`${options.title}\n\n${message}`);
+}
+
 type DiscountKind = "AMOUNT" | "PERCENTAGE";
 type ProductClassification = "VEG" | "NON_VEG" | "NOT_APPLICABLE";
 type OrderReportFile = { fileName: string; contentBase64: string };
@@ -43,17 +56,13 @@ type Product = {
   subcategory?: string | null;
   classification?: ProductClassification;
   price: number | string;
-  stock: number;
-  stockUnit?: string;
-  lowStockThreshold?: number;
   isVegetarian?: boolean;
   isSignature?: boolean;
   isActive: boolean;
   categoryId: number;
-  category?: { id: number; name: string };
+  category?: { id: number; name: string; sortOrder?: number };
   variants?: ProductVariant[];
 };
-
 type Table = { id: number; number: number; status: string; isParcel?: boolean };
 type OrderItem = {
   id: number;
@@ -63,6 +72,7 @@ type OrderItem = {
   product: { name: string };
   variant?: { name: string } | null;
 };
+
 type Order = {
   id: number;
   status: string;
@@ -92,6 +102,8 @@ type Order = {
     amount?: string | number;
     amountReceived?: string | number | null;
     change?: string | number | null;
+    cashAmount?: string | number | null;
+    upiAmount?: string | number | null;
     method: string;
     status: string;
     paidAt?: string | null;
@@ -166,6 +178,36 @@ async function saveOrderReportFiles(
 
 const tableLabel = (table?: { number: number; isParcel?: boolean } | null) =>
   table ? (table.isParcel ? "Parcel" : `Table ${table.number}`) : "Table unavailable";
+
+const legacyVariantProducts = new Map([
+  ["grill half", { product: "Grill", variant: "Half" }],
+  ["grill full", { product: "Grill", variant: "Full" }],
+  ["pepper bbq quarter", { product: "Pepper BBQ", variant: "Quarter" }],
+  ["pepper bbq half", { product: "Pepper BBQ", variant: "Half" }],
+  ["pepper bbq full", { product: "Pepper BBQ", variant: "Full" }],
+  ["plain bbq quarter", { product: "Plain BBQ", variant: "Quarter" }],
+  ["plain bbq half", { product: "Plain BBQ", variant: "Half" }],
+  ["plain bbq full", { product: "Plain BBQ", variant: "Full" }],
+]);
+
+function normalizeMenuName(value: string) {
+  return value.trim().replace(/\s*-\s*/g, " ").replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+}
+
+function isRedundantVariantProduct(product: Product, products: Product[]) {
+  const legacy = legacyVariantProducts.get(normalizeMenuName(product.name));
+  if (!legacy) return false;
+
+  return products.some(
+    (candidate) =>
+      candidate.id !== product.id &&
+      candidate.categoryId === product.categoryId &&
+      normalizeMenuName(candidate.name) === normalizeMenuName(legacy.product) &&
+      candidate.variants?.some(
+        (variant) => normalizeMenuName(variant.name) === normalizeMenuName(legacy.variant),
+      ),
+  );
+}
 
 class AppErrorBoundary extends Component<
   { children: ReactNode },
@@ -282,7 +324,12 @@ async function request(path: string, options: RequestInit = {}, token?: string) 
   });
 
   const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(data?.message ?? "Request failed");
+  if (!response.ok) {
+    const method = (options.method ?? "GET").toUpperCase();
+    const message =
+      typeof data?.message === "string" ? data.message : "Request failed";
+    throw new Error(`${method} ${path} failed (HTTP ${response.status}): ${message}`);
+  }
   return data;
 }
 
@@ -369,7 +416,7 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [checkingConnection, setCheckingConnection] = useState(true);
+  const [checkingConnection, setCheckingConnection] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function ensureBackendAvailable() {
@@ -398,10 +445,6 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
     setCheckingConnection(false);
     return true;
   }
-
-  useEffect(() => {
-    void ensureBackendAvailable();
-  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -506,7 +549,11 @@ function ReceiptPreview({
     (sum, item) => sum + Number(item.quantity || 0),
     0,
   );
-  const settlementType = order.payment?.method ?? (paid ? "PAID" : "UNPAID");
+  const paymentMethod = order.payment?.method;
+  const settlementType =
+    paymentMethod === "CASH_UPI"
+      ? "CASH + UPI"
+      : paymentMethod ?? (paid ? "PAID" : "UNPAID");
   const gstCharged = order.gstEnabled !== false;
   const receiptDate = new Date(order.payment?.paidAt ?? order.createdAt);
   const dateTime = Number.isNaN(receiptDate.getTime())
@@ -551,6 +598,7 @@ function ReceiptPreview({
               alt="Big Bites logo"
             />
             <h2>{RECEIPT_RESTAURANT_NAME}</h2>
+            {order.table?.isParcel && <div className="receipt-parcel">PARCEL</div>}
           </div>
 
           <hr className="receipt-divider" />
@@ -574,10 +622,12 @@ function ReceiptPreview({
               <span>Date:</span>
               <strong>{dateTime}</strong>
             </div>
-            <div>
-              <span>Table:</span>
-              <strong>{order.table?.isParcel ? "Parcel" : order.table?.number ?? "—"}</strong>
-            </div>
+            {!order.table?.isParcel && (
+              <div>
+                <span>Table:</span>
+                <strong>{order.table?.number ?? "—"}</strong>
+              </div>
+            )}
             <div>
               <span>Cashier:</span>
               <strong>{cashierName}</strong>
@@ -664,6 +714,18 @@ function ReceiptPreview({
               <span>Payment method</span>
               <strong>{settlementType}</strong>
             </div>
+            {paid && paymentMethod === "CASH_UPI" && (
+              <>
+                <div className="receipt-summary-row">
+                  <span>Cash</span>
+                  <strong>{money(order.payment?.cashAmount ?? 0)}</strong>
+                </div>
+                <div className="receipt-summary-row">
+                  <span>UPI</span>
+                  <strong>{money(order.payment?.upiAmount ?? 0)}</strong>
+                </div>
+              </>
+            )}
             {paid && order.payment?.amountReceived != null && (
               <div className="receipt-summary-row">
                 <span>Amount received</span>
@@ -707,12 +769,15 @@ function BillingScreen({
   const [selected, setSelected] = useState<Order | null>(null);
   const [method, setMethod] = useState("CASH");
   const [amountReceived, setAmountReceived] = useState("");
+  const [cashPaymentAmount, setCashPaymentAmount] = useState("");
+  const [upiPaymentAmount, setUpiPaymentAmount] = useState("");
   const [discountType, setDiscountType] = useState<DiscountKind>("AMOUNT");
   const [discountValue, setDiscountValue] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [showPayment, setShowPayment] = useState(false);
   const [paying, setPaying] = useState(false);
+  const [cancellingOrder, setCancellingOrder] = useState(false);
   const payingRef = useRef(false);
   const [preview, setPreview] = useState<Order | null>(null);
   const [orderQuery, setOrderQuery] = useState("");
@@ -872,13 +937,25 @@ function BillingScreen({
   const receivedMinor = amountReceived.trim()
     ? parseMinorUnits(amountReceived)
     : null;
+  const cashPaymentMinor = cashPaymentAmount.trim()
+    ? parseMinorUnits(cashPaymentAmount)
+    : null;
+  const upiPaymentMinor = upiPaymentAmount.trim()
+    ? parseMinorUnits(upiPaymentAmount)
+    : null;
   const paymentDueMinor = parseMinorUnits(paymentDue);
   const cashPaymentValid =
     (!selectedIsBillable || enteredDiscount !== null) &&
-    (method !== "CASH" ||
-      (receivedMinor !== null &&
-      paymentDueMinor !== null &&
-      receivedMinor >= paymentDueMinor));
+    (method === "CASH"
+      ? receivedMinor !== null &&
+        paymentDueMinor !== null &&
+        receivedMinor >= paymentDueMinor
+      : method === "CASH_UPI"
+        ? cashPaymentMinor !== null &&
+          upiPaymentMinor !== null &&
+          paymentDueMinor !== null &&
+          cashPaymentMinor + upiPaymentMinor === paymentDueMinor
+        : true);
 
   async function pay() {
     if (!selected || payingRef.current || !cashPaymentValid) return;
@@ -899,7 +976,12 @@ function BillingScreen({
             method,
             ...(method === "CASH"
               ? { amountReceived: amountReceived.trim() }
-              : {}),
+              : method === "CASH_UPI"
+                ? {
+                    cashAmount: cashPaymentAmount.trim(),
+                    upiAmount: upiPaymentAmount.trim(),
+                  }
+                : {}),
           }),
         },
         token,
@@ -933,6 +1015,8 @@ function BillingScreen({
       setSelected(null);
       setShowPayment(false);
       setAmountReceived("");
+      setCashPaymentAmount("");
+      setUpiPaymentAmount("");
       await load();
       if (reportExportError) {
         setError(
@@ -945,6 +1029,49 @@ function BillingScreen({
     } finally {
       payingRef.current = false;
       setPaying(false);
+    }
+  }
+
+  async function cancelSelectedOrder() {
+    if (!selected || cancellingOrder) return;
+    const order = selected;
+    let confirmed: boolean;
+    try {
+      confirmed = await confirmAction(
+        `Cancel order #${order.id}? The order will remain in history.`,
+        { title: "Confirm order cancellation", kind: "warning" },
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to show order cancellation confirmation",
+      );
+      return;
+    }
+    if (!confirmed) {
+      return;
+    }
+
+    setCancellingOrder(true);
+    setError("");
+    setSuccess("");
+    try {
+      await request(
+        `/api/orders/${order.id}/cancel`,
+        { method: "PATCH" },
+        token,
+      );
+      setSelected(null);
+      setShowPayment(false);
+      setSuccess(`Order #${order.id} cancelled. Its history has been retained.`);
+      await load();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Unable to cancel this order",
+      );
+    } finally {
+      setCancellingOrder(false);
     }
   }
 
@@ -1086,6 +1213,21 @@ function BillingScreen({
                 <span className="pill neutral">{tableLabel(selected.table).toUpperCase()}</span>
               </div>
 
+              {selected.status !== "COMPLETED" &&
+                selected.status !== "CANCELLED" &&
+                selected.payment?.status !== "PAID" &&
+                selected.payment?.status !== "REFUNDED" && (
+                  <div className="action-row">
+                    <button
+                      className="danger-btn"
+                      onClick={() => void cancelSelectedOrder()}
+                      disabled={cancellingOrder || paying}
+                    >
+                      {cancellingOrder ? "Cancelling..." : "Cancel Order"}
+                    </button>
+                  </div>
+                )}
+
               {selected.restaurantAddress?.trim() && (
                 <div className="bill-restaurant-address">
                   {selected.restaurantAddress}
@@ -1209,6 +1351,8 @@ function BillingScreen({
                   className="primary-btn full"
                   onClick={() => {
                     setAmountReceived(paymentDue.toFixed(2));
+                    setCashPaymentAmount(paymentDue.toFixed(2));
+                    setUpiPaymentAmount("0.00");
                     setShowPayment(true);
                   }}
                 >
@@ -1222,7 +1366,12 @@ function BillingScreen({
                   </div>
 
                   <div className="payment-methods">
-                    {["CASH", "UPI", "CARD"].map((value) => (
+                    {[
+                      ["CASH", "CASH"],
+                      ["UPI", "UPI"],
+                      ["CARD", "CARD"],
+                      ["CASH_UPI", "CASH + UPI"],
+                    ].map(([value, label]) => (
                       <button
                         key={value}
                         className={method === value ? "method-btn active" : "method-btn"}
@@ -1231,12 +1380,67 @@ function BillingScreen({
                           if (value === "CASH" && !amountReceived.trim()) {
                             setAmountReceived(paymentDue.toFixed(2));
                           }
+                          if (
+                            value === "CASH_UPI" &&
+                            !cashPaymentAmount.trim() &&
+                            !upiPaymentAmount.trim()
+                          ) {
+                            setCashPaymentAmount(paymentDue.toFixed(2));
+                            setUpiPaymentAmount("0.00");
+                          }
                         }}
                       >
-                        {value}
+                        {label}
                       </button>
                     ))}
                   </div>
+
+                  {method === "CASH_UPI" && (
+                    <div className="discount-controls">
+                      <label className="money-input">
+                        Cash amount
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={cashPaymentAmount}
+                          onChange={(event) =>
+                            setCashPaymentAmount(event.target.value)
+                          }
+                        />
+                      </label>
+                      <label className="money-input">
+                        UPI amount
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={upiPaymentAmount}
+                          onChange={(event) =>
+                            setUpiPaymentAmount(event.target.value)
+                          }
+                        />
+                      </label>
+                      {cashPaymentAmount &&
+                        upiPaymentAmount &&
+                        (cashPaymentMinor === null ||
+                          upiPaymentMinor === null) && (
+                          <span className="field-error">
+                            Enter cash and UPI amounts with at most 2 decimal
+                            places.
+                          </span>
+                        )}
+                      {cashPaymentMinor !== null &&
+                        upiPaymentMinor !== null &&
+                        paymentDueMinor !== null &&
+                        cashPaymentMinor + upiPaymentMinor !==
+                          paymentDueMinor && (
+                          <span className="field-error">
+                            Cash and UPI must total {money(paymentDue)}.
+                          </span>
+                        )}
+                    </div>
+                  )}
 
                   {method === "CASH" && (
                     <label className="money-input">
@@ -1302,7 +1506,7 @@ function BillingScreen({
                     Order #{order.id} · {tableLabel(order.table)}
                   </strong>
                   <span>
-                    {money(orderAmounts(order).grandTotal)} · {order.payment?.method ?? "-"} · PAID
+                  {money(orderAmounts(order).grandTotal)} · {order.payment?.method === "CASH_UPI" ? "CASH + UPI" : order.payment?.method ?? "-"} · PAID
                   </span>
                 </div>
                 <button className="secondary-btn small" onClick={() => setPreview(order)}>
@@ -1357,6 +1561,8 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
   const [orderMessage, setOrderMessage] = useState("");
   const [waitersLoading, setWaitersLoading] = useState(false);
   const [error, setError] = useState("");
+  const [catalogSyncing, setCatalogSyncing] = useState(false);
+  const [catalogSyncMessage, setCatalogSyncMessage] = useState("");
   const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [tableModalOpen, setTableModalOpen] = useState(false);
@@ -1379,9 +1585,6 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
     subcategory: "",
     categoryId: "",
     price: "",
-    stock: "",
-    stockUnit: "pcs",
-    lowStockThreshold: "0",
     classification: "VEG" as ProductClassification,
     isSignature: false,
     isActive: true,
@@ -1429,6 +1632,55 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load admin data");
+    }
+  };
+
+  const syncProductionCatalog = async () => {
+    if (!PRODUCTION_CATALOG_SYNC_ENABLED) {
+      setError("Production catalog sync is disabled in this local-only build.");
+      return;
+    }
+    if (catalogSyncing) return;
+    setCatalogSyncing(true);
+
+    let confirmed: boolean;
+    try {
+      confirmed = await confirmAction(
+        "Fetch the current production menu and apply it to this local POS? Matching items will receive production names, categories, prices, and variants. Local-only products and variants will be preserved. Orders and billing remain local.",
+        { title: "Sync production menu", kind: "warning" },
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to show the production menu sync confirmation",
+      );
+      setCatalogSyncing(false);
+      return;
+    }
+    if (!confirmed) {
+      setCatalogSyncing(false);
+      return;
+    }
+
+    setCatalogSyncMessage("");
+    setError("");
+    try {
+      const result = await request(
+        "/api/admin/catalog/sync",
+        { method: "POST" },
+        token,
+      );
+      await load();
+      setCatalogSyncMessage(
+        `Synced ${result.products} production menu items, ${result.categories} categories, and ${result.variants} variants. Local-only products and variants were preserved.`,
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Unable to sync the production menu",
+      );
+    } finally {
+      setCatalogSyncing(false);
     }
   };
 
@@ -1557,6 +1809,38 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
     }
   };
 
+  const exportOrderReportMonth = async (month: string) => {
+    setReportExporting(true);
+    setReportMessage("");
+    setReportError("");
+    try {
+      if (!reportFolderPath) {
+        throw new Error("Choose an Excel save location first.");
+      }
+      const result = await request(
+        `/api/admin/order-reports/export/${encodeURIComponent(month)}`,
+        { method: "POST" },
+        token,
+      );
+      const savedFiles = await saveOrderReportFiles(reportFolderPath, result.reports);
+      if (savedFiles.length !== 1) {
+        throw new Error(`No workbook was created for ${month}.`);
+      }
+      setReportMessage(
+        `Saved ${month} report to the selected folder: ${savedFiles[0]}`,
+      );
+      await loadOrderReports();
+    } catch (err) {
+      setReportError(
+        err instanceof Error
+          ? err.message
+          : `Unable to export the ${month} report`,
+      );
+    } finally {
+      setReportExporting(false);
+    }
+  };
+
   useEffect(() => {
     if (activeTab === "settings") void loadGstSettings();
     if (activeTab === "reports") {
@@ -1624,11 +1908,19 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
   };
 
   const deleteUser = async (staffUser: User) => {
-    if (
-      !window.confirm(
+    let confirmed: boolean;
+    try {
+      confirmed = await confirmAction(
         `Delete ${staffUser.role === "WAITER" ? "waiter" : "user"} "${staffUser.name}"? Users with order history cannot be deleted.`,
-      )
-    ) {
+        { title: "Confirm deletion", kind: "warning" },
+      );
+    } catch (err) {
+      setWaiterError(
+        err instanceof Error ? err.message : "Unable to show confirmation",
+      );
+      return;
+    }
+    if (!confirmed) {
       return;
     }
 
@@ -1682,9 +1974,6 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
       subcategory: "",
       categoryId: categoryOptions[0]?.value ?? "",
       price: "",
-      stock: "",
-      stockUnit: "pcs",
-      lowStockThreshold: "0",
       classification: "VEG",
       isSignature: false,
       isActive: true,
@@ -1701,9 +1990,6 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
       subcategory: product.subcategory ?? "",
       categoryId: String(product.categoryId ?? product.category?.id ?? ""),
       price: String(product.price),
-      stock: String(product.stock),
-      stockUnit: product.stockUnit ?? "pcs",
-      lowStockThreshold: String(product.lowStockThreshold ?? 0),
       classification: product.classification ?? (product.isVegetarian === false ? "NON_VEG" : "VEG"),
       isSignature: Boolean(product.isSignature),
       isActive: Boolean(product.isActive),
@@ -1740,11 +2026,12 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
     }
 
     const payload = {
-      ...productForm,
+      name: productForm.name,
+      description: productForm.description,
+      subcategory: productForm.subcategory,
       categoryId: Number(productForm.categoryId),
       price: Number(productForm.price),
-      stock: Number(productForm.stock),
-      lowStockThreshold: Number(productForm.lowStockThreshold),
+      classification: productForm.classification,
       isVegetarian: productForm.classification === "VEG",
       isSignature: Boolean(productForm.isSignature),
       isActive: Boolean(productForm.isActive),
@@ -1799,45 +2086,17 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
     }
   };
 
-  const adjustProductStock = async (product: Product, mode: "add" | "set") => {
-    const label = mode === "add" ? "Add stock for" : "Set stock for";
-    const value = window.prompt(
-      mode === "add"
-        ? `${label} ${product.name}. Enter a positive quantity to add.`
-        : `${label} ${product.name}. Enter the new total stock quantity.`,
-      mode === "add" ? "10" : String(product.stock),
-    );
-    if (value === null || value.trim() === "") return;
-    const quantity = Number(value);
-    if (!Number.isInteger(quantity) || (mode === "add" ? quantity <= 0 : quantity < 0)) {
-      setError(mode === "add" ? "Added stock must be a positive integer." : "New stock must be a non-negative integer.");
+  const deleteProduct = async (product: Product) => {
+    let confirmed: boolean;
+    try {
+      confirmed = await confirmAction(
+        `Delete "${product.name}"? If this item has historical orders, it will be deactivated rather than permanently removed.`,
+        { title: "Confirm deletion", kind: "warning" },
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to show confirmation");
       return;
     }
-
-    try {
-      await request(
-        `/api/admin/products/${product.id}/stock`,
-        {
-          method: "PATCH",
-          body: JSON.stringify(
-            mode === "add"
-              ? { quantity, reason: `Added stock for ${product.name}` }
-              : { newStock: quantity, reason: `Set stock for ${product.name}` },
-          ),
-        },
-        token,
-      );
-      setError("");
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to update stock");
-    }
-  };
-
-  const deleteProduct = async (product: Product) => {
-    const confirmed = window.confirm(
-      `Delete "${product.name}"? If this item has historical orders, it will be deactivated rather than permanently removed.`,
-    );
     if (!confirmed) return;
 
     try {
@@ -1855,10 +2114,21 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
       order.payment?.status === "PAID" ||
       order.payment?.status === "REFUNDED";
     const confirmation = paidOrCompleted
-      ? `Delete order #${order.id} and its payment record? This cannot be undone and sold stock will not be restored.`
-      : `Delete unpaid order #${order.id}? Its items and pending payment record will be deleted, and its stock returned.`;
+      ? `Delete order #${order.id} and its payment record? This cannot be undone.`
+      : `Delete unpaid order #${order.id}? Its items and pending payment record will be deleted.`;
 
-    if (role !== "ADMIN" || !window.confirm(confirmation)) return;
+    if (role !== "ADMIN") return;
+    let confirmed: boolean;
+    try {
+      confirmed = await confirmAction(confirmation, {
+        title: "Confirm order deletion",
+        kind: "warning",
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to show confirmation");
+      return;
+    }
+    if (!confirmed) return;
 
     setError("");
     setOrderMessage("");
@@ -2044,7 +2314,7 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                 <section className="panel">
                   <div className="panel-heading">
                     <div>
-                      <div className="eyebrow">Inventory</div>
+                      <div className="eyebrow">Tables</div>
                       <h3>Table status</h3>
                     </div>
                   </div>
@@ -2075,7 +2345,7 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                           <span>{order.status}</span>
                           <span>{money(orderAmounts(order).grandTotal)}</span>
                           <time>{new Date(order.createdAt).toLocaleString()}</time>
-                          {role === "ADMIN" && (
+                          {role === "ADMIN" && PRODUCTION_CATALOG_SYNC_ENABLED && (
                             <button
                               type="button"
                               className="order-delete-btn"
@@ -2115,6 +2385,10 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                 <div>
                   <div className="eyebrow">Food catalog</div>
                   <h3>Food &amp; products</h3>
+                  <p className="page-subtitle">
+                    The local menu is used by both POS and waiter apps. Sync
+                    requires internet; orders remain local.
+                  </p>
                 </div>
                 <div className="page-actions">
                   <label className="search-field compact">
@@ -2126,11 +2400,27 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                       aria-label="Search food"
                     />
                   </label>
+                  {role === "ADMIN" && (
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      onClick={() => void syncProductionCatalog()}
+                      disabled={catalogSyncing}
+                    >
+                      {catalogSyncing ? "Syncing menu..." : "Sync production menu"}
+                    </button>
+                  )}
                   <button className="primary-btn" onClick={openCreateProduct}>
                     + Add food
                   </button>
                 </div>
               </div>
+
+              {catalogSyncMessage && (
+                <div className="success-banner" role="status">
+                  {catalogSyncMessage}
+                </div>
+              )}
 
               <div className="table-wrap">
                 <table className="data-table">
@@ -2139,17 +2429,21 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                       <th>Name</th>
                       <th>Category</th>
                       <th>Price</th>
-                      <th>Stock</th>
                       <th>Status</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
+                    {visibleProducts.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="empty-state">
+                          {products.length === 0
+                            ? "No menu items are stored on this local POS yet. An administrator can sync the production menu while online."
+                            : "No menu items match this search."}
+                        </td>
+                      </tr>
+                    )}
                     {visibleProducts.map((product) => {
-                      const isLowStock =
-                        Number(product.lowStockThreshold ?? 0) > 0 &&
-                        Number(product.stock ?? 0) <= Number(product.lowStockThreshold ?? 0);
-
                       return (
                         <tr key={product.id}>
                           <td>
@@ -2174,32 +2468,17 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                               </div>
                             </div>
                           </td>
-                          <td>{product.category?.name ?? product.categoryId}</td>
+                          <td>{product.category?.name ?? product.categoryId}                                                    </td>
                           <td>{money(product.price)}</td>
                           <td>
-                            <div>
-                              <strong>{product.stock}</strong>
-                              {product.stockUnit && <div className="tiny-meta">{product.stockUnit}</div>}
-                            </div>
-                          </td>
-                          <td>
-                            <div style={{ display: "grid", gap: 4 }}>
-                              <span className={product.isActive ? "status-text success" : "status-text danger"}>
-                                {product.isActive ? "Active" : "Inactive"}
-                              </span>
-                              {isLowStock && <span className="status-text danger">Low stock</span>}
-                            </div>
+                            <span className={product.isActive ? "status-text success" : "status-text danger"}>
+                              {product.isActive ? "Active" : "Inactive"}
+                            </span>
                           </td>
                           <td>
                             <div className="table-actions">
                               <button className="secondary-btn small" onClick={() => openEditProduct(product)}>
                                 Edit
-                              </button>
-                              <button className="secondary-btn small" onClick={() => void adjustProductStock(product, "add")}>
-                                + Stock
-                              </button>
-                              <button className="secondary-btn small" onClick={() => void adjustProductStock(product, "set")}>
-                                Set
                               </button>
                               <button className="danger-btn small" onClick={() => void deleteProduct(product)}>
                                 Delete
@@ -2305,7 +2584,7 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
               {error && <div className="error-banner">{error}</div>}
               {orderMessage && <div className="success-banner">{orderMessage}</div>}
               <div className="data-list">
-                {orders.map((order) => (
+                {(orders.filter((order) => order.status !== "CANCELLED")).map((order) => (
                   <div className="data-row order-data-row" key={order.id}>
                     <strong className="data-row-primary">Order #{order.id} · {tableLabel(order.table)}</strong>
                     <span className="data-row-secondary order-row-details">
@@ -2360,7 +2639,11 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                       Payment #{payment.id} · Order #{payment.orderId}
                     </strong>
                     <span className="data-row-secondary payment-row-details">
-                      <span>{payment.method ?? "—"}</span>
+                      <span>
+                        {payment.method === "CASH_UPI"
+                          ? `CASH ${money(payment.cashAmount ?? 0)} + UPI ${money(payment.upiAmount ?? 0)}`
+                          : payment.method ?? "—"}
+                      </span>
                       <span>{payment.status}</span>
                       <strong>{money(payment.amount)}</strong>
                     </span>
@@ -2585,11 +2868,25 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                 <div className="data-list">
                   {reportSummary.months.map((month) => (
                     <div className="data-row" key={month.month}>
-                      <strong className="data-row-primary">{month.fileName}</strong>
-                      <span className="data-row-secondary">
-                        {month.orderCount} paid order(s) · Monthly total income{" "}
-                        {money(month.totalIncome)}
-                      </span>
+                      <div>
+                        <strong className="data-row-primary">{month.fileName}</strong>
+                        <span className="data-row-secondary">
+                          {month.orderCount} paid order(s) · Monthly total income{" "}
+                          {money(month.totalIncome)}
+                        </span>
+                      </div>
+                      <button
+                        className="secondary-btn"
+                        onClick={() => void exportOrderReportMonth(month.month)}
+                        disabled={
+                          !reportFolderPath ||
+                          reportLoading ||
+                          reportLocationSaving ||
+                          reportExporting
+                        }
+                      >
+                        Export {month.month}
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -2792,50 +3089,17 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                 </label>
               </div>
 
-              <div className="two-col">
-                <label>
-                  Stock
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={productForm.stock}
-                    onChange={(event) => setProductForm((current) => ({ ...current, stock: event.target.value }))}
-                    required
-                  />
-                </label>
-
-                <label>
-                  Stock unit
-                  <input
-                    value={productForm.stockUnit}
-                    onChange={(event) => setProductForm((current) => ({ ...current, stockUnit: event.target.value }))}
-                  />
-                </label>
-              </div>
-
-              <div className="two-col">
-                <label>
-                  Low-stock threshold
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    value={productForm.lowStockThreshold}
-                    onChange={(event) => setProductForm((current) => ({ ...current, lowStockThreshold: event.target.value }))}
-                  />
-                </label>
-
-                <div className="switch-row">
-                  <span>Available</span>
-                  <button
-                    type="button"
-                    className={productForm.isActive ? "toggle-btn active" : "toggle-btn"}
-                    onClick={() => setProductForm((current) => ({ ...current, isActive: !current.isActive }))}
-                  >
-                    <span className="toggle-knob" />
-                  </button>
-                </div>
+              <div className="switch-row">
+                <span>Available</span>
+                <button
+                  type="button"
+                  className={productForm.isActive ? "toggle-btn active" : "toggle-btn"}
+                  onClick={() =>
+                    setProductForm((current) => ({ ...current, isActive: !current.isActive }))
+                  }
+                >
+                  <span className="toggle-knob" />
+                </button>
               </div>
 
               <div className="two-col">
@@ -3028,17 +3292,30 @@ function WaiterModeScreen({ token }: { token: string }) {
   const [products, setProducts] = useState<Product[]>([]);
   const [selectedTableId, setSelectedTableId] = useState<number | null>(null);
   const [activeOrderId, setActiveOrderId] = useState<number | null>(null);
+  const [activeOrderTotalMinor, setActiveOrderTotalMinor] = useState<bigint | null>(null);
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [selectedVariants, setSelectedVariants] = useState<Record<number, number>>({});
   const [menuCategoryId, setMenuCategoryId] = useState<number | null>(null);
   const [menuSearch, setMenuSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [cancellingOrder, setCancellingOrder] = useState(false);
   const submittingRef = useRef(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
   const selectedTable = tables.find((table) => table.id === selectedTableId) ?? null;
+  const orderedMenuCategories = useMemo(
+    () =>
+      [...categories].sort(
+        (left, right) =>
+          (left.sortOrder ?? Number.MAX_SAFE_INTEGER) -
+            (right.sortOrder ?? Number.MAX_SAFE_INTEGER) ||
+          left.name.localeCompare(right.name) ||
+          left.id - right.id,
+      ),
+    [categories],
+  );
 
   useEffect(() => {
     void loadData();
@@ -3077,15 +3354,29 @@ function WaiterModeScreen({ token }: { token: string }) {
 
   const visibleMenuProducts = useMemo(() => {
     const query = menuSearch.trim().toLocaleLowerCase();
-    return products.filter((product) => {
-      if (menuCategoryId !== null && product.categoryId !== menuCategoryId) return false;
-      if (!query) return true;
-      return [product.name, product.category?.name ?? "", product.subcategory ?? ""]
-        .join(" ")
-        .toLocaleLowerCase()
-        .includes(query);
-    });
-  }, [menuCategoryId, menuSearch, products]);
+    const categoryById = new Map(categories.map((category) => [category.id, category]));
+    return products
+      .filter((product) => {
+        if (menuCategoryId !== null && product.categoryId !== menuCategoryId) return false;
+        if (isRedundantVariantProduct(product, products)) return false;
+        if (!query) return true;
+        return [product.name, product.category?.name ?? "", product.subcategory ?? ""]
+          .join(" ")
+          .toLocaleLowerCase()
+          .includes(query);
+      })
+      .sort((left, right) => {
+        const leftCategory = left.category ?? categoryById.get(left.categoryId);
+        const rightCategory = right.category ?? categoryById.get(right.categoryId);
+        return (
+          (leftCategory?.sortOrder ?? Number.MAX_SAFE_INTEGER) -
+            (rightCategory?.sortOrder ?? Number.MAX_SAFE_INTEGER) ||
+          (leftCategory?.name ?? "").localeCompare(rightCategory?.name ?? "") ||
+          left.name.localeCompare(right.name) ||
+          left.id - right.id
+        );
+      });
+  }, [categories, menuCategoryId, menuSearch, products]);
 
   const cartTotal = useMemo(() => {
     return Object.entries(quantities).reduce((sum, [key, quantity]) => {
@@ -3103,14 +3394,37 @@ function WaiterModeScreen({ token }: { token: string }) {
     }, 0n);
   }, [products, quantities]);
 
-  function updateQuantity(productId: number, variantId: number | null, delta: number, stock: number) {
+  const hasDraftItems = Object.values(quantities).some((quantity) => quantity > 0);
+  const displayedOrderTotalMinor = hasDraftItems ? cartTotal : (activeOrderTotalMinor ?? cartTotal);
+
+  async function refreshActiveOrder(tableId: number) {
+    try {
+      const activeOrder = await request(`/api/orders/table/${tableId}/active`, {}, token);
+      const nextActiveOrderId =
+        activeOrder && typeof activeOrder === "object" && "id" in activeOrder
+          ? Number((activeOrder as { id: number }).id)
+          : null;
+      const nextActiveOrderTotalMinor =
+        activeOrder && typeof activeOrder === "object" && "total" in activeOrder
+          ? parseMinorUnits(String((activeOrder as { total: string | number }).total ?? 0))
+          : null;
+      setActiveOrderId(nextActiveOrderId);
+      setActiveOrderTotalMinor(nextActiveOrderTotalMinor);
+      return { activeOrderId: nextActiveOrderId, activeOrderTotalMinor: nextActiveOrderTotalMinor };
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load table order");
+      setActiveOrderId(null);
+      setActiveOrderTotalMinor(null);
+      return { activeOrderId: null, activeOrderTotalMinor: null };
+    }
+  }
+
+  function updateQuantity(productId: number, variantId: number | null, delta: number) {
     setSuccess("");
     setQuantities((current) => {
       const key = `${productId}:${variantId ?? ""}`;
-      const totalProductQuantity = Object.entries(current)
-        .filter(([currentKey]) => currentKey.startsWith(`${productId}:`))
-        .reduce((sum, [, quantity]) => sum + quantity, 0);
-      if (delta > 0 && totalProductQuantity >= stock) return current;
+      const product = products.find((item) => item.id === productId);
+      if (!product) return current;
       const nextQuantity = Math.max(0, (current[key] ?? 0) + delta);
       if (nextQuantity === 0) {
         const { [key]: _removed, ...rest } = current;
@@ -3124,13 +3438,8 @@ function WaiterModeScreen({ token }: { token: string }) {
     setSelectedTableId(tableId);
     setQuantities({});
     setSuccess("");
-
-    try {
-      const activeOrder = await request(`/api/orders/table/${tableId}/active`, {}, token);
-      setActiveOrderId(activeOrder && typeof activeOrder === "object" && "id" in activeOrder ? Number((activeOrder as { id: number }).id) : null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load table order");
-    }
+    setActiveOrderTotalMinor(null);
+    await refreshActiveOrder(tableId);
   }
 
   async function submitOrder() {
@@ -3174,14 +3483,21 @@ function WaiterModeScreen({ token }: { token: string }) {
         body: JSON.stringify(body),
       }, token);
 
+      const createdOrderId = Number((response as { order?: { id?: number; total?: string | number } })?.order?.id);
+      const createdOrderTotal = parseMinorUnits(
+        String((response as { order?: { total?: string | number } })?.order?.total ?? 0),
+      );
       setSuccess(
         activeOrderId
-          ? "Items were added to the active table order."
-          : `Order created for ${selectedTable ? (selectedTable.isParcel ? "Parcel" : `Table ${selectedTable.number}`) : "the selected table"}.`,
+          ? `Items were added to the active table order. Current total: ${money(minorUnitsToNumber(createdOrderTotal ?? activeOrderTotalMinor ?? 0n))}.`
+          : `Order created for ${selectedTable ? (selectedTable.isParcel ? "Parcel" : `Table ${selectedTable.number}`) : "the selected table"}. Total: ${money(minorUnitsToNumber(createdOrderTotal ?? 0n))}.`,
       );
       setQuantities({});
-      const createdOrderId = Number((response as { order?: { id?: number } })?.order?.id);
       setActiveOrderId(activeOrderId ?? (Number.isInteger(createdOrderId) && createdOrderId > 0 ? createdOrderId : null));
+      setActiveOrderTotalMinor(createdOrderTotal ?? activeOrderTotalMinor ?? null);
+      if (selectedTableId != null) {
+        await refreshActiveOrder(selectedTableId);
+      }
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to create the order");
@@ -3206,13 +3522,43 @@ function WaiterModeScreen({ token }: { token: string }) {
       await request(`/api/orders/${activeOrderId}/send-to-cashier`, { method: "PATCH" }, token);
       setSuccess("Order sent to cashier successfully.");
       setActiveOrderId(null);
+      setActiveOrderTotalMinor(null);
       setQuantities({});
+      if (selectedTableId != null) {
+        await refreshActiveOrder(selectedTableId);
+      }
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to send the order to cashier");
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
+    }
+  }
+
+  async function cancelActiveOrder() {
+    if (submittingRef.current || activeOrderId == null) return;
+
+    const orderId = activeOrderId;
+    submittingRef.current = true;
+    setSubmitting(true);
+    setCancellingOrder(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      await request(`/api/orders/${orderId}/cancel`, { method: "PATCH" }, token);
+      setActiveOrderId(null);
+      setActiveOrderTotalMinor(null);
+      setQuantities({});
+      setSuccess(`Order #${orderId} cancelled.`);
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to cancel this order");
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+      setCancellingOrder(false);
     }
   }
 
@@ -3297,7 +3643,7 @@ function WaiterModeScreen({ token }: { token: string }) {
                     aria-label="Search menu"
                   />
                 </label>
-                <div className="card-actions" aria-label="Menu categories">
+                <div className="card-actions waiter-category-bar" aria-label="Menu categories">
                   <button
                     type="button"
                     className={menuCategoryId === null ? "secondary-btn small active" : "secondary-btn small"}
@@ -3305,7 +3651,7 @@ function WaiterModeScreen({ token }: { token: string }) {
                   >
                     All
                   </button>
-                  {categories.map((category) => (
+                  {orderedMenuCategories.map((category) => (
                     <button
                       type="button"
                       key={category.id}
@@ -3317,18 +3663,45 @@ function WaiterModeScreen({ token }: { token: string }) {
                   ))}
                 </div>
 
-                <div className="bill-items">
+                <div className="waiter-order-action-bar" aria-label="Order actions">
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => void submitOrder()}
+                    disabled={submitting}
+                  >
+                    {submitting ? "Processing..." : activeOrderId ? "Add items to order" : "Place order"}
+                  </button>
+                  {activeOrderId && (
+                    <>
+                      <button
+                        type="button"
+                        className="secondary-btn"
+                        onClick={() => void sendToCashier()}
+                        disabled={submitting}
+                      >
+                        Send to cashier
+                      </button>
+                      <button
+                        type="button"
+                        className="danger-btn"
+                        onClick={() => void cancelActiveOrder()}
+                        disabled={submitting}
+                      >
+                        {cancellingOrder ? "Cancelling..." : "Cancel Order"}
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                <div className="bill-items waiter-menu-items">
                   {visibleMenuProducts.map((product) => {
-                    const stock = Number(product.stock ?? 0);
                     const selectedVariantId = selectedVariants[product.id] ?? null;
                     const selectedVariant = product.variants?.find(
                       (variant) => variant.id === selectedVariantId,
                     );
                     const quantityKey = `${product.id}:${selectedVariantId ?? ""}`;
                     const quantity = quantities[quantityKey] ?? 0;
-                    const totalQuantity = Object.entries(quantities)
-                      .filter(([key]) => key.startsWith(`${product.id}:`))
-                      .reduce((sum, [, count]) => sum + count, 0);
                     return (
                       <div className="bill-item" key={product.id}>
                         <div>
@@ -3361,15 +3734,19 @@ function WaiterModeScreen({ token }: { token: string }) {
                             </select>
                           )}
                           <span>
-                            {money(selectedVariant?.price ?? product.price)} · Stock {stock}
+                            {money(selectedVariant?.price ?? product.price)}
                           </span>
                         </div>
                         <div className="card-actions">
-                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, selectedVariantId, -1, stock)} disabled={quantity === 0}>
+                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, selectedVariantId, -1)} disabled={quantity === 0}>
                             −
                           </button>
                           <strong>{quantity}</strong>
-                          <button type="button" className="secondary-btn small" onClick={() => updateQuantity(product.id, selectedVariantId, 1, stock)} disabled={totalQuantity >= stock}>
+                          <button
+                            type="button"
+                            className="secondary-btn small"
+                            onClick={() => updateQuantity(product.id, selectedVariantId, 1)}
+                          >
                             +
                           </button>
                         </div>
@@ -3377,13 +3754,15 @@ function WaiterModeScreen({ token }: { token: string }) {
                     );
                   })}
                   {visibleMenuProducts.length === 0 && (
-                    <div className="empty-state"><h4>No menu items match this filter</h4></div>
+                    <div className="empty-state">
+                      <h4>No menu items match this filter</h4>
+                    </div>
                   )}
                 </div>
 
                 <div className="bill-total-row">
-                  <span>Selected total</span>
-                  <strong>{money(minorUnitsToNumber(cartTotal))}</strong>
+                  <span>{hasDraftItems ? "Selected total" : activeOrderId ? "Saved order total" : "Selected total"}</span>
+                  <strong>{money(minorUnitsToNumber(displayedOrderTotalMinor))}</strong>
                 </div>
 
                 <div className="action-row">
@@ -3392,29 +3771,6 @@ function WaiterModeScreen({ token }: { token: string }) {
                   </button>
                 </div>
 
-                <div className="action-row">
-                  <button
-                    type="button"
-                    className="primary-btn full"
-                    onClick={() => void submitOrder()}
-                    disabled={submitting}
-                  >
-                    {submitting ? "Processing..." : activeOrderId ? "Add items to order" : "Place order"}
-                  </button>
-                </div>
-
-                {activeOrderId && (
-                  <div className="action-row">
-                    <button
-                      type="button"
-                      className="secondary-btn full"
-                      onClick={() => void sendToCashier()}
-                      disabled={submitting}
-                    >
-                      Send to cashier
-                    </button>
-                  </div>
-                )}
               </>
             )}
           </section>

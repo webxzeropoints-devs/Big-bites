@@ -8,7 +8,7 @@
     "postinstall": "prisma skills sync || exit 0",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "prestart": "prisma migrate deploy",
+    "prestart": "node scripts/run-start-migrations.cjs",
     "start": "node dist/server.js"
   },
   "keywords": [],

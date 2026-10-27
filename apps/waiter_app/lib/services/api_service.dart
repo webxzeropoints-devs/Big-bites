@@ -6,40 +6,156 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 class ApiService {
-  static const String _defaultBaseUrl =
-      'https://big-bites-server.onrender.com';
-  static const String _configuredBaseUrl = String.fromEnvironment(
+  static const String _explicitBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: _defaultBaseUrl,
+    defaultValue: '',
   );
-  static String baseUrl = _configuredBaseUrl;
+  static String baseUrl = _explicitBaseUrl;
 
-  static Future<String> checkBackend() async {
-    try {
-      await _checkHealth(baseUrl);
+  static const String _discoveryRequest = 'BIGBITES_POS_DISCOVERY_V1';
+  static const int _discoveryPort = 3001;
+  static const int _serverPort = 3000;
+  static const Duration _discoveryTimeout = Duration(seconds: 5);
+  static const Duration _healthTimeout = Duration(seconds: 8);
+  static const Duration _reconnectInterval = Duration(seconds: 15);
+
+  static const String _localServerUnavailable =
+      'Unable to find the BIG BITES POS server. Connect to the restaurant '
+      'Wi-Fi/LAN and ensure the desktop POS is running.';
+  static Timer? _reconnectTimer;
+  static Future<String>? _backendCheck;
+
+  static Future<String> checkBackend() {
+    final currentCheck = _backendCheck;
+    if (currentCheck != null) return currentCheck;
+
+    final check = _checkBackend();
+    _backendCheck = check;
+    return check.whenComplete(() {
+      if (identical(_backendCheck, check)) _backendCheck = null;
+    });
+  }
+
+  static void startReconnectMonitor() {
+    _reconnectTimer ??= Timer.periodic(_reconnectInterval, (_) {
+      checkBackend().catchError((Object _) => baseUrl);
+    });
+  }
+
+  static Future<String> _checkBackend() async {
+    if (_explicitBaseUrl.isNotEmpty) {
+      await _checkHealth(_explicitBaseUrl);
+      baseUrl = _explicitBaseUrl;
       return baseUrl;
-    } on TimeoutException {
-      throw Exception(
-        'The BIG BITES server did not respond in time. Check your internet '
-        'connection and retry.',
-      );
-    } on SocketException {
-      throw Exception(
-        'Unable to connect to the BIG BITES server. Check your internet '
-        'connection and retry.',
-      );
-    } on http.ClientException {
-      throw Exception(
-        'Unable to reach the BIG BITES server. Check your internet '
-        'connection and retry.',
-      );
     }
+
+    try {
+      final host = await _discoverServer();
+      if (host == null) {
+        throw Exception(_localServerUnavailable);
+      }
+
+      final discoveredUrl = 'http://$host:$_serverPort';
+      await _checkHealth(discoveredUrl);
+      baseUrl = discoveredUrl;
+      return baseUrl;
+    } on SocketException {
+      throw Exception(_localServerUnavailable);
+    } on TimeoutException {
+      throw Exception(_localServerUnavailable);
+    } on http.ClientException {
+      throw Exception(_localServerUnavailable);
+    } on FormatException {
+      throw Exception(_localServerUnavailable);
+    } on Exception {
+      throw Exception(_localServerUnavailable);
+    }
+  }
+
+  static Future<String?> _discoverServer() async {
+    final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+    StreamSubscription<RawSocketEvent>? subscription;
+    try {
+      socket.broadcastEnabled = true;
+      final response = Completer<String?>();
+      subscription = socket.listen(
+        (event) {
+          if (event != RawSocketEvent.read) return;
+
+          Datagram? datagram;
+          while ((datagram = socket.receive()) != null) {
+            try {
+              final decoded = jsonDecode(
+                utf8.decode(datagram!.data, allowMalformed: false),
+              );
+              if (decoded is! Map ||
+                  decoded['service'] != 'big-bites-pos' ||
+                  decoded['port'] is! int ||
+                  decoded['port'] != _serverPort ||
+                  decoded['host'] is! String) {
+                continue;
+              }
+
+              final address = InternetAddress.tryParse(
+                decoded['host'] as String,
+              );
+              if (address == null ||
+                  address.type != InternetAddressType.IPv4 ||
+                  !_isPrivateIPv4(address.address)) {
+                continue;
+              }
+
+              if (!response.isCompleted) {
+                response.complete(address.address);
+              }
+            } on FormatException {
+              // Ignore malformed packets and continue listening.
+            }
+          }
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          if (!response.isCompleted) {
+            response.completeError(error, stackTrace);
+          }
+        },
+        onDone: () {
+          if (!response.isCompleted) response.complete(null);
+        },
+      );
+      socket.send(
+        utf8.encode(_discoveryRequest),
+        InternetAddress('255.255.255.255'),
+        _discoveryPort,
+      );
+      return await response.future.timeout(
+        _discoveryTimeout,
+        onTimeout: () => null,
+      );
+    } finally {
+      try {
+        await subscription?.cancel();
+      } finally {
+        socket.close();
+      }
+    }
+  }
+
+  static bool _isPrivateIPv4(String address) {
+    final octets = address.split('.').map(int.tryParse).toList();
+    if (octets.length != 4 || octets.any((octet) => octet == null)) {
+      return false;
+    }
+    final first = octets[0]!;
+    final second = octets[1]!;
+    return first == 10 ||
+        (first == 172 && second >= 16 && second <= 31) ||
+        (first == 192 && second == 168);
   }
 
   static Future<void> _checkHealth(String url) async {
     final response = await http
         .get(Uri.parse('$url/health'))
-        .timeout(const Duration(seconds: 20));
+        .timeout(_healthTimeout);
     dynamic data;
     try {
       data = jsonDecode(response.body);
@@ -293,6 +409,25 @@ class ApiService {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $token',
       },
+    );
+
+    dynamic decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } catch (_) {
+      decoded = {'message': 'Invalid server response'};
+    }
+
+    return {'statusCode': response.statusCode, 'data': decoded};
+  }
+
+  static Future<Map<String, dynamic>> cancelOrder({
+    required int orderId,
+    required String token,
+  }) async {
+    final response = await http.patch(
+      Uri.parse('$baseUrl/api/orders/$orderId/cancel'),
+      headers: {'Authorization': 'Bearer $token'},
     );
 
     dynamic decoded;

@@ -720,7 +720,7 @@ router.post(
           select: { id: true },
         });
 
-        if (!otherActiveOrder && !table.isParcel) {
+        if (!otherActiveOrder) {
           await tx.restaurantTable.update({
             where: { id: order.tableId },
             data: { status: "AVAILABLE" },
@@ -1195,7 +1195,7 @@ router.post(
           ? currentTable.status
           : "AVAILABLE";
 
-        if (!otherActiveOrder && !currentTable.isParcel) {
+        if (!otherActiveOrder) {
           await tx.restaurantTable.update({
             where: {
               id: tableId,

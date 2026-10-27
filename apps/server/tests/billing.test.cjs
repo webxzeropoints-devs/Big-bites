@@ -2,9 +2,14 @@ const assert = require("node:assert/strict");
 const { after, test } = require("node:test");
 const express = require("express");
 
+
 process.env.AUTH_SECRET = "isolated-billing-route-test-secret";
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = "postgresql://localhost:55439/big_bites_test";
+}
 
 const { prisma } = require("../dist/config/database.js");
+
 const { createToken, optionalAuth } = require("../dist/middleware/auth.js");
 const billingRouter = require("../dist/routes/billing.js").default;
 
@@ -89,7 +94,13 @@ function installPrismaMocks() {
         Object.assign(order, data);
         return order;
       },
-      findFirst: async () => null,
+      findFirst: async ({ where }) =>
+  [...orders.values()].find(
+    (order) =>
+      order.tableId === where.tableId &&
+      order.id !== where.id?.not &&
+      !where.status?.notIn?.includes(order.status),
+  ) ?? null,
     },
     payment: {
       update: async ({ where, data }) => {
@@ -255,11 +266,11 @@ test("CASH + UPI payment requires an exact split and persists both tender amount
   assert.equal(tables.get(1).status, "AVAILABLE");
 });
 
-test("parcel payment completes its order without changing any restaurant table status", async () => {
+test("parcel payment releases the occupied parcel option when no active order remains", async () => {
   const parcelOrder = makeOrder(1, 2, "1.00");
   resetState([parcelOrder]);
   tables.set(1, { id: 1, number: 1, isParcel: false, status: "OCCUPIED" });
-  tables.set(2, { id: 2, number: 0, isParcel: true, status: "AVAILABLE" });
+  tables.set(2, { id: 2, number: 0, isParcel: true, status: "OCCUPIED" });
   installPrismaMocks();
   const baseUrl = await createAppServer();
 
@@ -388,6 +399,24 @@ test("non-cash payment rejects tender input and records exact paid amount", asyn
   assert.equal(orders.get(1).payment.change, null);
 });
 
+test("UPI payment remains recorded as UPI and completes the order", async () => {
+  resetState([makeOrder(1, 1, "10.00")]);
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+
+  const response = await request(baseUrl, "/api/billing/orders/1/pay", {
+    token: userToken,
+    body: { method: "UPI" },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(orders.get(1).status, "COMPLETED");
+  assert.equal(orders.get(1).payment.status, "PAID");
+  assert.equal(orders.get(1).payment.method, "UPI");
+  assert.equal(orders.get(1).payment.amountReceived, null);
+  assert.equal(tables.get(1).status, "AVAILABLE");
+});
+
 test("table payment sums rounded invoice totals and records cash tender/change", async () => {
   resetState([
     makeOrder(1, 1, "1.00"),
@@ -467,4 +496,23 @@ test("payment routes reject null or malformed request bodies without crashing", 
     body: null,
   });
   assert.equal(table.status, 400);
+});
+
+test("single-order payment keeps table occupied when another active order remains", async () => {
+  resetState([
+    makeOrder(1, 1, "1.00"),
+    makeOrder(2, 1, "2.00", { status: "CONFIRMED" }),
+  ]);
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+
+  const paid = await request(baseUrl, "/api/billing/orders/1/pay", {
+    token: userToken,
+    body: { method: "UPI" },
+  });
+
+  assert.equal(paid.status, 200);
+  assert.equal(orders.get(1).status, "COMPLETED");
+  assert.equal(orders.get(2).status, "CONFIRMED");
+  assert.equal(tables.get(1).status, "OCCUPIED");
 });

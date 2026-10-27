@@ -420,8 +420,10 @@ These are source-path checks, not simulated production outages:
   checks the database and the installer checks health and test logins before
   creating the shortcut.
 - The configured new-machine path requires an elevated Windows 10/11 x64
-  install, internet access, and `winget`; it installs Node/PostgreSQL, writes
-  a local environment file, migrates/seeds, opens local-subnet TCP/UDP
+  install. Node.js is bundled privately; when PostgreSQL is absent setup needs
+  internet access to download and signature-verify the EnterpriseDB installer.
+  No `winget` dependency remains. The setup writes a local environment file,
+  migrates, opens local-subnet TCP/UDP
   firewall rules, and registers a startup task. Waiter discovery requires the
   phone and POS PC to share a LAN that allows UDP broadcast and the API ports.
 - The installer does not make a database backup before running migrations or

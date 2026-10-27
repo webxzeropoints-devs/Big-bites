@@ -1,14 +1,27 @@
-import { PrismaClient, ProductClassification } from "@prisma/client";
+import {
+  Prisma,
+  PrismaClient,
+  ProductClassification,
+} from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import "dotenv/config";
+import { hashPassword } from "../../src/utils/password.js";
 
-const connectionString = process.env.DATABASE_URL;
-
-if (!connectionString) {
-  throw new Error("DATABASE_URL is not defined");
+function getDatabaseUrl(): string {
+  const value = process.env.DATABASE_URL;
+  if (!value) throw new Error("DATABASE_URL is not defined");
+  return value;
 }
 
-if (process.env.CONFIRM_MENU_SEED !== "YES_UPDATE_MENU_ONLY") {
+const connectionString = getDatabaseUrl();
+
+const installerBootstrap =
+  process.env.BIGBITES_INSTALL_BOOTSTRAP === "CREATE_EMPTY_DATABASE";
+
+if (
+  !installerBootstrap &&
+  process.env.CONFIRM_MENU_SEED !== "YES_UPDATE_MENU_ONLY"
+) {
   throw new Error(
     "Set CONFIRM_MENU_SEED=YES_UPDATE_MENU_ONLY to confirm this menu-only database update.",
   );
@@ -287,7 +300,368 @@ const legacyVariantNames = [
   ),
 ];
 
+type InstallerAccount = {
+  name: string;
+  username: string;
+  password: string;
+  role: "ADMIN" | "CASHIER" | "WAITER";
+};
+
+type InstallerBootstrapInput = {
+  confirmInitialMenu: true;
+  accounts: InstallerAccount[];
+};
+
+async function readInstallerBootstrapInput(): Promise<InstallerBootstrapInput> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  let input: unknown;
+  try {
+    const encoded = Buffer.concat(chunks).toString("ascii").trim();
+    input = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  } catch {
+    throw new Error("Installer setup input was invalid.");
+  }
+
+  if (
+    !input ||
+    typeof input !== "object" ||
+    !("confirmInitialMenu" in input) ||
+    input.confirmInitialMenu !== true ||
+    !("accounts" in input) ||
+    !Array.isArray(input.accounts) ||
+    input.accounts.length !== 3
+  ) {
+    throw new Error("Installer setup input was incomplete.");
+  }
+
+  const expectedRoles = ["ADMIN", "CASHIER", "WAITER"];
+  const usernames = new Set<string>();
+  const accounts = input.accounts.map((account, index) => {
+    if (!account || typeof account !== "object") {
+      throw new Error("Installer account details were invalid.");
+    }
+    const candidate = account as Record<string, unknown>;
+    const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+    const username =
+      typeof candidate.username === "string"
+        ? candidate.username.trim()
+        : "";
+    const password =
+      typeof candidate.password === "string" ? candidate.password : "";
+    const role = candidate.role;
+    const normalizedUsername = username.toLocaleLowerCase("en-US");
+
+    if (
+      !name ||
+      name.length > 100 ||
+      !/^[A-Za-z0-9._-]{1,64}$/.test(username) ||
+      password.length < 12 ||
+      role !== expectedRoles[index] ||
+      usernames.has(normalizedUsername)
+    ) {
+      throw new Error(
+        "Each account needs a unique username, name, and password of at least 12 characters.",
+      );
+    }
+
+    usernames.add(normalizedUsername);
+    return {
+      name,
+      username,
+      password,
+      role: role as InstallerAccount["role"],
+    };
+  });
+
+  return { confirmInitialMenu: true, accounts };
+}
+
+async function assertDatabaseSafeForInstallerBootstrap(
+  tx: Prisma.TransactionClient,
+) {
+  const unknownTables = await tx.$queryRaw<{ tablename: string }[]>`
+    SELECT tablename
+    FROM pg_catalog.pg_tables
+    WHERE schemaname = 'public'
+      AND tablename NOT IN (
+        '_prisma_migrations',
+        'User',
+        'RestaurantTable',
+        'Category',
+        'Product',
+        'ProductVariant',
+        'Order',
+        'RestaurantSettings',
+        'OrderItem',
+        'Payment'
+      )
+  `;
+  if (unknownTables.length > 0) {
+    throw new Error(
+      "Installer initialization stopped because the database contains unrecognized tables.",
+    );
+  }
+
+  const sequences = await tx.$queryRaw<
+    {
+      table_name: string;
+      last_value: bigint | null;
+      sequence_exists: boolean;
+      can_read_sequence: boolean;
+    }[]
+  >`
+    WITH expected_sequences AS (
+      SELECT
+        table_name,
+        to_regclass(
+          pg_get_serial_sequence(
+            format('%I.%I', 'public', table_name),
+            'id'
+          )
+        ) AS sequence_oid
+      FROM unnest(ARRAY[
+        'User',
+        'RestaurantTable',
+        'Category',
+        'Product',
+        'ProductVariant',
+        'Order',
+        'OrderItem',
+        'Payment'
+      ]::text[]) AS tables(table_name)
+    )
+    SELECT
+      expected.table_name,
+      sequences.last_value,
+      (sequence_class.oid IS NOT NULL) AS sequence_exists,
+      CASE
+        WHEN sequence_class.oid IS NULL THEN false
+        ELSE has_sequence_privilege(current_user, sequence_class.oid, 'SELECT')
+      END AS can_read_sequence
+    FROM expected_sequences AS expected
+    LEFT JOIN pg_class AS sequence_class
+      ON sequence_class.oid = expected.sequence_oid
+    LEFT JOIN pg_namespace AS sequence_schema
+      ON sequence_schema.oid = sequence_class.relnamespace
+    LEFT JOIN pg_sequences AS sequences
+      ON sequences.schemaname = sequence_schema.nspname
+      AND sequences.sequencename = sequence_class.relname
+  `;
+  const hasUnexpectedSequenceUse =
+    sequences.length !== 9 ||
+    sequences.some(
+      ({ table_name, last_value, sequence_exists, can_read_sequence }) =>
+        !sequence_exists ||
+        !can_read_sequence ||
+        (table_name === "RestaurantTable"
+          ? last_value !== 1n
+          : last_value !== null),
+    );
+
+  const [
+    userCount,
+    categoryCount,
+    productCount,
+    variantCount,
+    orderCount,
+    orderItemCount,
+    paymentCount,
+    tables,
+    settings,
+  ] = await Promise.all([
+    tx.user.count(),
+    tx.category.count(),
+    tx.product.count(),
+    tx.productVariant.count(),
+    tx.order.count(),
+    tx.orderItem.count(),
+    tx.payment.count(),
+    tx.restaurantTable.findMany({
+      select: { number: true, isParcel: true, status: true },
+    }),
+    tx.restaurantSettings.findMany({
+      select: {
+        id: true,
+        gstRate: true,
+        gstEnabled: true,
+        orderReportsPath: true,
+        restaurantAddress: true,
+        fssaiEnabled: true,
+        fssaiNumber: true,
+        gstinEnabled: true,
+        gstinNumber: true,
+      },
+    }),
+  ]);
+
+  const hasBusinessRows = [
+    userCount,
+    categoryCount,
+    productCount,
+    variantCount,
+    orderCount,
+    orderItemCount,
+    paymentCount,
+  ].some((count) => count !== 0);
+  const hasNonDefaultTables =
+    tables.length > 1 ||
+    (tables.length === 1 &&
+      (tables[0].number !== 0 ||
+        !tables[0].isParcel ||
+        tables[0].status !== "AVAILABLE"));
+  const hasNonDefaultSettings =
+    settings.length > 1 ||
+    (settings.length === 1 &&
+      (settings[0].id !== 1 ||
+        Number(settings[0].gstRate) !== 5 ||
+        !settings[0].gstEnabled ||
+        settings[0].orderReportsPath !== "" ||
+        settings[0].restaurantAddress !== "" ||
+        settings[0].fssaiEnabled ||
+        settings[0].fssaiNumber !== "" ||
+        settings[0].gstinEnabled ||
+        settings[0].gstinNumber !== ""));
+
+  if (
+    hasBusinessRows ||
+    hasNonDefaultTables ||
+    hasNonDefaultSettings ||
+    hasUnexpectedSequenceUse
+  ) {
+    throw new Error(
+      "Installer initialization stopped: the database is not empty. Existing users, menu, orders, payments, tables, or settings were not changed.",
+    );
+  }
+}
+
+async function createInitialMenu(tx: Prisma.TransactionClient) {
+  const categoryIds = new Map<string, number>();
+  for (const [index, name] of categories.entries()) {
+    const category = await tx.category.create({
+      data: { name, sortOrder: index },
+    });
+    categoryIds.set(name, category.id);
+  }
+
+  let createdVariants = 0;
+  for (const product of menu) {
+    const categoryId = categoryIds.get(product.category);
+    if (!categoryId) throw new Error("Initial menu data was incomplete.");
+
+    const classification = product.classification;
+    const savedProduct = await tx.product.create({
+      data: {
+        slug: `${slugify(product.category)}-${slugify(product.name)}`,
+        name: product.name,
+        price: product.price,
+        categoryId,
+        classification,
+        isVegetarian: classification === VEG,
+        subcategory: product.subcategory ?? null,
+        isSignature: product.signature ?? false,
+      },
+    });
+
+    for (const variant of product.variants ?? []) {
+      await tx.productVariant.create({
+        data: {
+          productId: savedProduct.id,
+          name: variant.name,
+          price: variant.price,
+        },
+      });
+      createdVariants += 1;
+    }
+  }
+
+  return {
+    categories: categories.length,
+    products: menu.length,
+    variants: createdVariants,
+  };
+}
+
+async function createInitialAccounts(
+  tx: Prisma.TransactionClient,
+  accounts: InstallerAccount[],
+) {
+  const hashedAccounts = await Promise.all(
+    accounts.map(async (account) => ({
+      ...account,
+      password: await hashPassword(account.password),
+    })),
+  );
+
+  for (const account of hashedAccounts) {
+    await tx.user.create({
+      data: {
+        name: account.name,
+        username: account.username,
+        password: account.password,
+        role: account.role,
+      },
+    });
+  }
+
+  return hashedAccounts.length;
+}
+
+async function initializeEmptyDatabase() {
+  const target = new URL(connectionString);
+  const schemaParameters = target.searchParams.getAll("schema");
+  if (
+    target.protocol !== "postgresql:" ||
+    !["localhost", "127.0.0.1", "[::1]", "::1"].includes(target.hostname) ||
+    target.port !== "5432" ||
+    decodeURIComponent(target.username) !== "bigbites_app" ||
+    !target.password ||
+    decodeURIComponent(target.pathname.replace(/^\/+/, "")) !== "bigbites" ||
+    target.search !== "?schema=public" ||
+    schemaParameters.length !== 1 ||
+    schemaParameters[0] !== "public"
+  ) {
+    throw new Error(
+      "Installer initialization requires the exact local bigbites database, bigbites_app role, port 5432, and public schema; the configured database was not contacted.",
+    );
+  }
+
+  const input = await readInstallerBootstrapInput();
+
+  const result = await prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(804217531)`;
+      await assertDatabaseSafeForInstallerBootstrap(tx);
+
+      const menuResult = await createInitialMenu(tx);
+      const accountCount = await createInitialAccounts(tx, input.accounts);
+
+      return {
+        ...menuResult,
+        accounts: accountCount,
+      };
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      maxWait: 10_000,
+      timeout: 120_000,
+    },
+  );
+
+  console.log(
+    `Initialized an empty local database with ${result.categories} categories, ${result.products} products, ${result.variants} variants, and ${result.accounts} accounts.`,
+  );
+}
+
 async function main() {
+  if (installerBootstrap) {
+    await initializeEmptyDatabase();
+    return;
+  }
+
   const database = await prisma.$queryRaw<{ database: string }[]>`
     SELECT current_database() AS database
   `;

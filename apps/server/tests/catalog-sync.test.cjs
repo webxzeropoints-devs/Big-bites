@@ -3,6 +3,7 @@ const { after, test } = require("node:test");
 const express = require("express");
 
 process.env.AUTH_SECRET = "isolated-catalog-sync-test-secret";
+process.env.BIGBITES_ENABLE_PRODUCTION_CATALOG_SYNC = "true";
 const localDatabaseUrl =
   "postgresql://local@127.0.0.1:5432/bigbites?schema=public";
 process.env.DATABASE_URL = localDatabaseUrl;
@@ -348,6 +349,24 @@ test("catalog sync refuses to write when the backend is not configured for the i
     assert.equal(requestedUrls.length, 0);
   } finally {
     process.env.DATABASE_URL = localDatabaseUrl;
+  }
+});
+
+test("catalog sync is disabled by default", async () => {
+  installPrismaMocks();
+  const requestedUrls = installFetchMock();
+  const baseUrl = await createAppServer();
+  const enabled = process.env.BIGBITES_ENABLE_PRODUCTION_CATALOG_SYNC;
+
+  delete process.env.BIGBITES_ENABLE_PRODUCTION_CATALOG_SYNC;
+  try {
+    const response = await syncCatalog(baseUrl);
+    assert.equal(response.status, 409);
+    assert.match((await response.json()).message, /disabled/i);
+    assert.equal(transactionCount, 0);
+    assert.equal(requestedUrls.length, 0);
+  } finally {
+    process.env.BIGBITES_ENABLE_PRODUCTION_CATALOG_SYNC = enabled;
   }
 });
 

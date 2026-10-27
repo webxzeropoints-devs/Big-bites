@@ -88,15 +88,45 @@ button:disabled { cursor: not-allowed; opacity: .6; }
 .order-card-grid { margin-top: 17px; padding-top: 13px; border-top: 1px solid #eee9e3; }
 .order-card-grid strong { display: block; margin-top: 4px; font-size: 13px; }
 .card-actions { margin-top: 13px; }
+.waiter-category-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 104px), 1fr));
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  align-items: stretch;
+  justify-content: stretch;
+  gap: 8px;
+  margin: 0 0 13px;
+  padding: 2px 2px 8px;
+}
+.waiter-category-bar > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: normal;
+}
 .text-link { color: #9a6b1f; font-size: 12px; font-weight: 800; }
-.bill-panel { display: flex; flex-direction: column; }
+.bill-panel { display: flex; flex-direction: column; min-width: 0; }
 .bill-placeholder, .empty-state { display: grid; place-items: center; align-content: center; min-height: 300px; text-align: center; color: #737a83; }
 .placeholder-icon, .empty-icon { color: #b78b42; font-size: 28px; margin-bottom: 8px; }
 .bill-placeholder h3, .empty-state h4 { margin: 0 0 7px; color: #343a42; }
 .bill-placeholder p { max-width: 330px; margin: 0; font-size: 13px; line-height: 1.6; }
 .bill-header { padding-bottom: 18px; border-bottom: 1px solid #eee9e3; }
 .bill-header h3 { margin: 5px 0 0; font-size: 24px; }
+.waiter-order-action-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr)); gap: 8px; margin: 12px 0 4px; padding: 10px; border: 1px solid #e8dfd5; border-radius: 12px; background: #fbf9f6; }
+.waiter-order-action-bar > button { min-width: 0; min-height: 42px; padding: 10px 12px; overflow-wrap: anywhere; }
 .bill-items { display: grid; gap: 0; padding: 8px 0; }
+.waiter-menu-items { max-height: min(58vh, 560px); overflow-y: auto; overscroll-behavior: contain; }
 .bill-item { padding: 14px 0; border-bottom: 1px solid #f0ece7; }
 .bill-item strong { font-size: 14px; }
 .bill-item span { margin-top: 5px; }
@@ -106,7 +136,7 @@ button:disabled { cursor: not-allowed; opacity: .6; }
 .payment-box { margin-top: 16px; padding: 16px; border: 1px solid #e8dfd5; border-radius: 12px; background: #fbf9f6; }
 .payment-box h4 { margin: 0 0 10px; }
 .due-amount { margin-bottom: 14px; color: #6e7783; font-size: 13px; }
-.payment-methods { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-bottom: 14px; }
+.payment-methods { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-bottom: 14px; }
 .method-btn { border: 1px solid #ded7cd; border-radius: 8px; background: #fff; padding: 9px; color: #6c7076; font-size: 12px; font-weight: 800; }
 .method-btn.active { border-color: #d4a24c; background: #f8edda; color: #79551c; }
 .money-input, .product-form label { display: grid; gap: 7px; color: #666b72; font-size: 12px; font-weight: 700; }
@@ -162,6 +192,9 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .receipt-tax-invoice {
   text-align: center;
 }
+.receipt-header {
+  position: relative;
+}
 .receipt-logo {
   display: block;
   width: min(55mm, 100%);
@@ -178,6 +211,13 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   letter-spacing: .02em;
   overflow-wrap: anywhere;
   white-space: pre-line;
+}
+.receipt-parcel {
+  margin-top: 4px;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-align: center;
 }
 .receipt-tax-invoice {
   margin: 6px 0 10px;
@@ -203,8 +243,10 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   line-height: 1.5;
 }
 .receipt-divider {
+  box-sizing: border-box;
   width: 100%;
-  margin: 11px 0;
+  margin: 9px 0;
+  padding: 0;
   border: 0;
   border-top: 1px dashed #333;
 }
@@ -237,6 +279,9 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .receipt-row > :not(:first-child) {
   text-align: right;
 }
+.receipt-row > :not(:first-child) {
+  font-weight: 700;
+}
 .receipt-row > :nth-child(2) {
   text-align: center;
 }
@@ -248,6 +293,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .receipt-item-name {
   min-width: 0;
   overflow-wrap: anywhere;
+  font-weight: 700;
 }
 .receipt-item-divider {
   width: 100%;
@@ -324,8 +370,9 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 .table-data-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px; }
 .data-row-status { justify-self: end; }
 .order-data-row, .payment-data-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 1.2fr); }
+.order-data-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
 .data-row-secondary { min-width: 0; }
-.order-row-details { display: grid; grid-template-columns: minmax(100px, .7fr) minmax(90px, .5fr) minmax(150px, 1fr) 36px; gap: 10px; align-items: center; }
+.order-row-details { display: grid; grid-template-columns: minmax(0, .7fr) minmax(0, .5fr) minmax(0, 1fr) 36px; gap: 10px; align-items: center; }
 .order-row-details > span, .order-row-details time { min-width: 0; overflow-wrap: anywhere; }
 .order-delete-btn { display: grid; width: 34px; height: 34px; place-items: center; padding: 7px; border: 1px solid #efc9c4; border-radius: 8px; background: #fff3f1; color: #b6433c; }
 .order-delete-btn:hover { border-color: #d99790; background: #ffe5e1; }
@@ -390,8 +437,12 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
 @media (max-width: 1000px) {
   .content-shell { width: min(100% - 32px, 760px); }
   .billing-layout, .admin-grid { grid-template-columns: 1fr; }
+  .admin-shell { grid-template-columns: minmax(0, 1fr); }
   .admin-sidebar { position: static; }
+  .sidebar-nav { grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); }
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .order-data-row, .payment-data-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  .order-row-details { grid-template-columns: repeat(3, minmax(0, 1fr)) 36px; }
   .gst-settings-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
@@ -404,6 +455,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   .stats-grid { grid-template-columns: 1fr; }
   .two-col { grid-template-columns: 1fr; }
   .search-field.compact { min-width: 0; flex: 1; }
+  .payment-methods { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .admin-header .page-actions { justify-content: flex-start; }
   .order-data-row, .payment-data-row { grid-template-columns: minmax(0, 1fr); gap: 7px; }
   .order-row-details { grid-template-columns: minmax(75px, .7fr) minmax(70px, .5fr) minmax(100px, 1fr) 36px; }
@@ -454,6 +506,7 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   .receipt-actions { display: none !important; }
 
   #receipt-to-print {
+    box-sizing: border-box;
     width: 80mm;
     max-width: 80mm;
     min-height: 0;
@@ -477,7 +530,21 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   }
 
   .receipt-divider {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 3mm 0;
+    padding: 0;
     border-top-style: dashed;
+  }
+
+  .receipt-item-divider {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 1mm 0 0;
+  }
+
+  .receipt-item-name {
+    font-weight: 700 !important;
   }
 
   .receipt-logo {

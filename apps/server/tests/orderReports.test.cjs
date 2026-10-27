@@ -112,7 +112,7 @@ async function readWorkbook(contentBase64) {
 }
 
 test("monthly export rebuilds paid orders and returns workbooks for local saving", async () => {
-  prisma.order.findMany = async () => orders;
+  prisma.order = { findMany: async () => orders };
 
   const firstExport = await exportAllOrderReports();
   const secondExport = await exportAllOrderReports();
@@ -139,6 +139,9 @@ test("monthly export rebuilds paid orders and returns workbooks for local saving
   assert.equal(sheet.getCell("J3").value, "OFF");
   assert.equal(sheet.getCell("K5").value, 46);
 
+  prisma.restaurantSettings = {
+    findUnique: async () => ({ orderReportsPath: "" }),
+  };
   const summary = await getOrderReportSummary();
   assert.equal(summary.months.length, 1);
   assert.equal(summary.months[0].orderCount, 3);
@@ -155,7 +158,7 @@ test("selected-month export contains only the selected reporting period", async 
       paidAt: new Date(2026, 10, 6, 12, 30),
     },
   };
-  prisma.order.findMany = async () => [...orders, novemberOrder];
+  prisma.order = { findMany: async () => [...orders, novemberOrder] };
 
   const report = await exportMonthlyOrderReport("2026-10");
   assert.equal(report.fileName, "October 2026.xlsx");

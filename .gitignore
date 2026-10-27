@@ -5,6 +5,9 @@
 **/dist/
 **/.widget_preview/
 **/target/
+apps/server/.windows-runtime/
+apps/server/.windows-runtime-staging-*/
+apps/server/.windows-runtime-backup-*/
 
 # Environment and local secrets
 **/.env

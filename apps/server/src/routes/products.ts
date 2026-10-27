@@ -53,7 +53,9 @@ router.get("/", async (req, res) => {
     normalizedProducts.sort(
       (left, right) =>
         left.category.sortOrder - right.category.sortOrder ||
-        left.name.localeCompare(right.name),
+        left.category.name.localeCompare(right.category.name) ||
+        left.name.localeCompare(right.name) ||
+        left.id - right.id,
     );
     return res.json(normalizedProducts);
   } catch (error) {
