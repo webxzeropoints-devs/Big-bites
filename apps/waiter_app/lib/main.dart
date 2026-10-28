@@ -894,7 +894,6 @@ class _MenuScreenState extends State<MenuScreen> {
           backgroundColor: Colors.green,
         ),
       );
-      Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

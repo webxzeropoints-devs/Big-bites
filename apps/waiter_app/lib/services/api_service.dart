@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 class ApiService {
   static const String _explicitBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: '',
+    defaultValue: 'https://big-bites-server.onrender.com',
   );
   static String baseUrl = _explicitBaseUrl;
 
@@ -20,8 +20,8 @@ class ApiService {
   static const Duration _reconnectInterval = Duration(seconds: 15);
 
   static const String _localServerUnavailable =
-      'Unable to find the BIG BITES POS server. Connect to the restaurant '
-      'Wi-Fi/LAN and ensure the desktop POS is running.';
+      'Unable to connect to the BIG BITES POS service. Check your internet '
+      'connection and try again.';
   static Timer? _reconnectTimer;
   static Future<String>? _backendCheck;
 

@@ -21,9 +21,9 @@ import {
 import "./App.css";
 
 const API_URL = (
-  isTauri()
-    ? "http://127.0.0.1:3000"
-    : import.meta.env.VITE_API_URL || "http://127.0.0.1:3000"
+  import.meta.env.DEV
+    ? import.meta.env.VITE_API_URL || "http://127.0.0.1:3000"
+    : "https://big-bites-server.onrender.com"
 ).replace(/\/$/, "");
 const PRODUCTION_CATALOG_SYNC_ENABLED =
   import.meta.env.VITE_ENABLE_PRODUCTION_CATALOG_SYNC === "true";
@@ -435,7 +435,7 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
 
     if (!healthy) {
       setError(
-        `The POS server is not available at ${API_URL}. Check the Big Bites backend service and retry.`,
+        `The hosted POS service is not available at ${API_URL}. Check your internet connection and retry.`,
       );
       setCheckingConnection(false);
       return false;
@@ -466,7 +466,7 @@ function Login({ onLogin }: { onLogin: (token: string, user: User) => void }) {
     } catch (err) {
       const message =
         err instanceof Error && err.message === "Failed to fetch"
-          ? `The POS server is unavailable at ${API_URL}. Please check the backend and retry.`
+          ? `The hosted POS service is unavailable at ${API_URL}. Please check your internet connection and retry.`
           : err instanceof Error
             ? err.message
             : "Login failed";
@@ -598,7 +598,14 @@ function ReceiptPreview({
               alt="Big Bites logo"
             />
             <h2>{RECEIPT_RESTAURANT_NAME}</h2>
-            {order.table?.isParcel && <div className="receipt-parcel">PARCEL</div>}
+            {order.table?.isParcel && (
+              <div
+                className="receipt-parcel"
+                aria-label="Parcel order"
+                title="Parcel"
+                role="img"
+              />
+            )}
           </div>
 
           <hr className="receipt-divider" />
@@ -3519,13 +3526,24 @@ function WaiterModeScreen({ token }: { token: string }) {
     setError("");
 
     try {
-      await request(`/api/orders/${activeOrderId}/send-to-cashier`, { method: "PATCH" }, token);
-      setSuccess("Order sent to cashier successfully.");
-      setActiveOrderId(null);
-      setActiveOrderTotalMinor(null);
+      const response = await request(`/api/orders/${activeOrderId}/send-to-cashier`, { method: "PATCH" }, token) as {
+        order?: { id?: number; status?: string; total?: string | number };
+      };
+      const nextOrderStatus = response.order?.status;
+      setSuccess(
+        nextOrderStatus === "READY_FOR_BILLING"
+          ? "Order sent to cashier successfully."
+          : "Order updated successfully.",
+      );
       setQuantities({});
       if (selectedTableId != null) {
-        await refreshActiveOrder(selectedTableId);
+        const refreshed = await refreshActiveOrder(selectedTableId);
+        if (refreshed.activeOrderId != null) {
+          setActiveOrderId(refreshed.activeOrderId);
+        }
+        if (refreshed.activeOrderTotalMinor != null) {
+          setActiveOrderTotalMinor(refreshed.activeOrderTotalMinor);
+        }
       }
       await loadData();
     } catch (err) {

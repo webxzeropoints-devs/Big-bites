@@ -392,6 +392,9 @@ router.patch(
         where: {
           id: orderId,
         },
+        include: {
+          payment: true,
+        },
       });
 
       if (!order) {
@@ -409,9 +412,12 @@ router.patch(
         });
       }
 
-      if (order.status !== "CONFIRMED") {
+      const canAddItems =
+        order.status === "CONFIRMED" || order.status === "READY_FOR_BILLING";
+
+      if (!canAddItems || order.payment?.status === "PAID") {
         return res.status(400).json({
-          message: "Items can only be added before the order is sent to cashier",
+          message: "Items can only be added before the order is paid",
         });
       }
 
@@ -468,6 +474,9 @@ router.patch(
           where: {
             id: orderId,
           },
+          include: {
+            payment: true,
+          },
         });
 
         if (!currentOrder) {
@@ -484,10 +493,14 @@ router.patch(
           );
         }
 
-        if (currentOrder.status !== "CONFIRMED") {
+        const canAddItems =
+          currentOrder.status === "CONFIRMED" ||
+          currentOrder.status === "READY_FOR_BILLING";
+
+        if (!canAddItems || currentOrder.payment?.status === "PAID") {
           throw new OrderRequestError(
             400,
-            "Items can only be added before the order is sent to cashier",
+            "Items can only be added before the order is paid",
           );
         }
 
