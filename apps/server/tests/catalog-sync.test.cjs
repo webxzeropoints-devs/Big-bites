@@ -43,6 +43,7 @@ const currentSchemaColumns = [
     "isSignature",
     "isActive",
     "categoryId",
+    "comboItems",
   ].map((columnName) => ["Product", columnName]),
   ...["id", "name", "price", "isActive", "productId"].map((columnName) => [
     "ProductVariant",
@@ -67,6 +68,7 @@ const products = [
     isSignature: false,
     isActive: true,
     categoryId: 9,
+    comboItems: null,
     category: { id: 9, name: "Starters" },
     variants: [{ id: 33, name: "Half", price: 30 }],
   },
@@ -177,6 +179,35 @@ test("admin catalog sync imports production catalog fields without stock", async
   assert.equal(productUpserts[0].update.price, "45.00");
   assert.equal(productUpserts[0].update.categoryId, 101);
   assert.equal(variantUpserts[0].create.price, "30.00");
+});
+
+test("catalog sync validates and preserves combo composition", async () => {
+  installPrismaMocks();
+  const combo = {
+    ...products[0],
+    slug: "couples-friends-combo-couples-friends-combo",
+    name: "Couples/Friends Combo",
+    description: "Fixed-price combo",
+    price: 499,
+    comboItems: [
+      { name: "Chicken Rice", quantity: 1 },
+      { name: "Chicken Briyani", quantity: 1 },
+      { name: "BBQ Quarter", quantity: 1 },
+      { name: "Chicken Lollipop", quantity: 1 },
+    ],
+  };
+  installFetchMock(categories, [combo]);
+  const baseUrl = await createAppServer();
+
+  const response = await syncCatalog(baseUrl);
+  assert.equal(response.status, 200);
+  assert.deepEqual(productUpserts[0].update.comboItems, combo.comboItems);
+
+  installPrismaMocks();
+  installFetchMock(categories, [{ ...combo, comboItems: [{ name: "", quantity: 0 }] }]);
+  const invalid = await syncCatalog(await createAppServer());
+  assert.equal(invalid.status, 502);
+  assert.equal(transactionCount, 0);
 });
 
 test("repeated catalog sync is idempotent and preserves local-only records", async () => {
@@ -300,8 +331,9 @@ test("catalog sync refuses the installed legacy schema before fetching or writin
   const response = await syncCatalog(baseUrl);
   assert.equal(response.status, 409);
   const payload = await response.json();
-  assert.match(payload.message, /cannot safely store.*variant prices/i);
+  assert.match(payload.message, /cannot safely store.*combo definitions/i);
   assert.ok(payload.missingColumns.includes("Product.slug"));
+  assert.ok(payload.missingColumns.includes("Product.comboItems"));
   assert.ok(payload.missingColumns.includes("ProductVariant.id"));
   assert.equal(requestedUrls.length, 0);
   assert.equal(transactionCount, 0);
@@ -370,22 +402,33 @@ test("catalog sync is disabled by default", async () => {
   }
 });
 
-test("stock management endpoint is removed", async () => {
+test("stock management is admin-only and supports explicit initialization", async () => {
   transactionCount = 0;
+  const product = {
+    id: 18,
+    name: "Test meal",
+    price: "45.00",
+    stock: 0,
+    stockUnit: "pcs",
+    lowStockThreshold: 2,
+    lastStockUpdatedAt: null,
+    variants: [],
+  };
+  const movements = [];
   prisma.$transaction = async (callback) => {
     transactionCount += 1;
     return callback({
+      $queryRaw: async () => [],
       product: {
-        findUnique: async () => ({ id: 18, stock: 8, isActive: true }),
-        update: async ({ data }) => ({
-          id: 18,
-          name: "Test meal",
-          price: "45.00",
-          stock: data.stock,
-          lowStockThreshold: 2,
-        }),
+        findUnique: async () => product,
+        update: async ({ data }) => Object.assign(product, data),
       },
-      productStockMovement: { create: async () => ({ id: 1 }) },
+      productStockMovement: {
+        create: async ({ data }) => {
+          movements.push(data);
+          return { id: movements.length, ...data };
+        },
+      },
     });
   };
   const baseUrl = await createAppServer();
@@ -411,8 +454,11 @@ test("stock management endpoint is removed", async () => {
 
   assert.equal((await requestStockChange(waiterToken)).status, 403);
   assert.equal((await requestStockChange(cashierToken)).status, 403);
-  assert.equal((await requestStockChange(adminToken)).status, 404);
-  assert.equal(transactionCount, 0);
+  assert.equal((await requestStockChange(adminToken)).status, 200);
+  assert.equal(transactionCount, 1);
+  assert.equal(product.stock, 12);
+  assert.ok(product.lastStockUpdatedAt instanceof Date);
+  assert.equal(movements[0].movementType, "INITIALIZATION");
 });
 
 test("monthly report API exports only the requested month for administrators", async () => {

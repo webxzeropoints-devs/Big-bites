@@ -1,5 +1,10 @@
 import { Router } from "express";
 import { createHash } from "node:crypto";
+import { Prisma } from "@prisma/client";
+import {
+  getComboDefinition,
+  isComboConfigurationValid,
+} from "../catalog/comboCatalog.js";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
 import { calculateGstAmounts } from "../utils/gst.js";
@@ -9,6 +14,7 @@ import {
   toMinorUnits,
 } from "../utils/currency.js";
 import { calculateOrderAmounts } from "../utils/financial.js";
+import { restoreOrderStock } from "../utils/inventory.js";
 import {
   lockOrderSequence,
   resetOrderSequenceIfEmpty,
@@ -41,6 +47,72 @@ class OrderRequestError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+type StockLine = { productId: number; quantity: number };
+
+async function deductTrackedStock(
+  tx: Prisma.TransactionClient,
+  orderId: number,
+  lines: readonly StockLine[],
+) {
+  const quantities = new Map<number, number>();
+  for (const line of lines) {
+    quantities.set(
+      line.productId,
+      (quantities.get(line.productId) ?? 0) + line.quantity,
+    );
+  }
+
+  for (const [productId, quantity] of [...quantities].sort(
+    ([left], [right]) => left - right,
+  )) {
+    await tx.$queryRaw`
+      SELECT "id" FROM "Product" WHERE "id" = ${productId} FOR UPDATE
+    `;
+    const product = await tx.product.findUnique({
+      where: { id: productId },
+      select: { id: true, name: true, stock: true, lastStockUpdatedAt: true },
+    });
+    if (!product) {
+      throw new OrderRequestError(404, `Product ${productId} not found`);
+    }
+    if (!product.lastStockUpdatedAt) continue;
+    if (product.stock < quantity) {
+      throw new OrderRequestError(
+        409,
+        `Insufficient stock for ${product.name}; ${product.stock} ${product.stock === 1 ? "unit" : "units"} available`,
+      );
+    }
+
+    const previousStock = product.stock;
+    const now = new Date();
+    const update = await tx.product.updateMany({
+      where: {
+        id: productId,
+        lastStockUpdatedAt: { not: null },
+        stock: { gte: quantity },
+      },
+      data: { stock: { decrement: quantity }, lastStockUpdatedAt: now },
+    });
+    if (update.count !== 1) {
+      throw new OrderRequestError(
+        409,
+        `Insufficient stock for ${product.name}; refresh the menu and try again`,
+      );
+    }
+    await tx.productStockMovement.create({
+      data: {
+        productId,
+        orderId,
+        movementType: "SALE",
+        quantity,
+        previousStock,
+        newStock: previousStock - quantity,
+        reason: `Order ${orderId}`,
+      },
+    });
   }
 }
 
@@ -143,6 +215,8 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
       quantity: number;
       unitPrice: string;
       subtotal: string;
+      comboSnapshot?: Prisma.InputJsonValue;
+      comboNameSnapshot?: string;
     }[] = [];
     let totalMinor = 0n;
 
@@ -157,6 +231,18 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
         return res.status(404).json({
           message: `Product ${productId} not found`,
         });
+      }
+
+      const combo = getComboDefinition(product.slug);
+      if (
+        combo &&
+        (variantId !== null ||
+          !isComboConfigurationValid(product.slug, product.price, product.comboItems))
+      ) {
+        throw new OrderRequestError(
+          409,
+          `${combo.name} is misconfigured; contact an administrator`,
+        );
       }
 
       const variant = variantId
@@ -174,6 +260,12 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
           where: { productId, isActive: true },
           select: { id: true },
         });
+        if (combo && hasVariants) {
+          throw new OrderRequestError(
+            409,
+            `${combo.name} is misconfigured; contact an administrator`,
+          );
+        }
         if (hasVariants) {
           return res.status(400).json({
             message: `Select a size for ${product.name}`,
@@ -182,7 +274,7 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
       }
 
       const unitPriceMinor = toMinorUnits(
-        String(variant?.price ?? product.price),
+        combo?.price ?? String(variant?.price ?? product.price),
         `Price for ${product.name}${variant ? ` (${variant.name})` : ""}`,
       );
       const subtotalMinor = multiplyMinorUnits(unitPriceMinor, quantity);
@@ -194,6 +286,12 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
         quantity,
         unitPrice: toDecimalString(unitPriceMinor),
         subtotal: toDecimalString(subtotalMinor),
+        ...(product.comboItems == null
+          ? {}
+          : {
+              comboNameSnapshot: combo?.name ?? product.name,
+              comboSnapshot: (combo?.items ?? product.comboItems) as Prisma.InputJsonValue,
+            }),
       });
     }
 
@@ -272,6 +370,12 @@ router.post("/", requireRoles("WAITER", "ADMIN"), async (req, res) => {
           payment: true,
         },
       });
+
+      await deductTrackedStock(
+        tx,
+        order.id,
+        newItems.map(({ productId, quantity }) => ({ productId, quantity })),
+      );
 
       if (!table.isParcel) {
         await tx.restaurantTable.update({
@@ -557,6 +661,8 @@ router.patch(
           quantity: number;
           unitPrice: string;
           subtotal: string;
+          comboSnapshot?: Prisma.InputJsonValue;
+          comboNameSnapshot?: string;
         }[] = [];
 
         for (const { productId, variantId, quantity } of productQuantities.values()) {
@@ -570,6 +676,18 @@ router.patch(
             throw new OrderRequestError(
               404,
               `Product ${productId} not found`,
+            );
+          }
+
+          const combo = getComboDefinition(product.slug);
+          if (
+            combo &&
+            (variantId !== null ||
+              !isComboConfigurationValid(product.slug, product.price, product.comboItems))
+          ) {
+            throw new OrderRequestError(
+              409,
+              `${combo.name} is misconfigured; contact an administrator`,
             );
           }
 
@@ -589,6 +707,12 @@ router.patch(
               where: { productId, isActive: true },
               select: { id: true },
             });
+            if (combo && hasVariants) {
+              throw new OrderRequestError(
+                409,
+                `${combo.name} is misconfigured; contact an administrator`,
+              );
+            }
             if (hasVariants) {
               throw new OrderRequestError(
                 400,
@@ -598,7 +722,7 @@ router.patch(
           }
 
           const unitPriceMinor = toMinorUnits(
-            String(variant?.price ?? product.price),
+            combo?.price ?? String(variant?.price ?? product.price),
             `Price for ${product.name}${variant ? ` (${variant.name})` : ""}`,
           );
           const subtotalMinor = multiplyMinorUnits(unitPriceMinor, quantity);
@@ -610,6 +734,12 @@ router.patch(
             quantity,
             unitPrice: toDecimalString(unitPriceMinor),
             subtotal: toDecimalString(subtotalMinor),
+            ...(product.comboItems == null
+              ? {}
+              : {
+                  comboNameSnapshot: combo?.name ?? product.name,
+                  comboSnapshot: (combo?.items ?? product.comboItems) as Prisma.InputJsonValue,
+                }),
           });
         }
 
@@ -627,6 +757,8 @@ router.patch(
           discountType: currentOrder.discountType,
           discountValue: currentOrder.discountValue,
         });
+
+        await deductTrackedStock(tx, orderId, newItems);
 
         await tx.orderItem.createMany({
           data: newItems.map((item) => ({
@@ -911,6 +1043,8 @@ router.patch(
         if (currentOrder.status === "CANCELLED") {
           throw new OrderRequestError(409, "Order is already cancelled");
         }
+
+        await restoreOrderStock(tx, orderId);
 
         const cancelledOrder = await tx.order.update({
           where: { id: orderId },

@@ -53,6 +53,10 @@ test("menu endpoints return active categories and products with normalized price
       isVegetarian: true,
       isSignature: false,
       isActive: true,
+      stock: 8,
+      stockUnit: "pcs",
+      lowStockThreshold: 2,
+      lastStockUpdatedAt: "2026-10-28T00:00:00.000Z",
       categoryId: 4,
       category: { id: 4, name: "Bread", sortOrder: 1 },
       variants: [],
@@ -70,6 +74,23 @@ test("menu endpoints return active categories and products with normalized price
         { id: 31, name: "Half", price: "100.00" },
         { id: 32, name: "Full", price: "150.00" },
       ],
+    },
+    {
+      id: 12,
+      name: "Couples/Friends Combo",
+      price: "499.00",
+      isVegetarian: false,
+      isSignature: false,
+      isActive: true,
+      categoryId: 2,
+      comboItems: [
+        { name: "Chicken Rice", quantity: 1 },
+        { name: "Chicken Briyani", quantity: 1 },
+        { name: "BBQ Quarter", quantity: 1 },
+        { name: "Chicken Lollipop", quantity: 1 },
+      ],
+      category: { id: 2, name: "Biryani", sortOrder: 1 },
+      variants: [],
     },
   ];
   let categoryQuery;
@@ -107,6 +128,13 @@ test("menu endpoints return active categories and products with normalized price
         { id: 31, name: "Half", price: 100 },
         { id: 32, name: "Full", price: 150 },
       ],
+    },
+    {
+      ...products[2],
+      price: 499,
+      isVegetarian: false,
+      isSignature: false,
+      variants: [],
     },
     {
       ...products[0],

@@ -6,7 +6,7 @@
     "build":  {
                   "beforeDevCommand":  "npm run dev",
                   "devUrl":  "http://localhost:1420",
-                  "beforeBuildCommand":  "npm run build \u0026\u0026 npm --prefix ../server run build \u0026\u0026 npm --prefix ../server run prepare:windows-runtime",
+                  "beforeBuildCommand":  "npm run build",
                   "frontendDist":  "../dist"
               },
     "app":  {
@@ -26,22 +26,6 @@
                    "targets":  [
                                    "nsis"
                                ],
-                   "resources":  {
-                                     "../../server/dist/": "resources/server/dist/",
-                                     "../../server/.windows-runtime/node_modules/": "resources/server/node_modules/",
-                                     "../../server/package.json": "resources/server/package.json",
-                                     "../../server/prisma/schema.prisma": "resources/server/prisma/schema.prisma",
-                                     "../../server/prisma/migrations/": "resources/server/prisma/migrations/",
-                                     "../../server/prisma/seed/": "resources/server/prisma/seed/",
-                                     "../../server/prisma.config.ts": "resources/server/prisma.config.ts",
-                                     "../../server/src/utils/password.ts": "resources/server/src/utils/password.ts",
-                                     "windows/Install-BigBites.ps1": "resources/windows/Install-BigBites.ps1",
-                                     "windows/Start-BigBitesServer.ps1": "resources/windows/Start-BigBitesServer.ps1",
-                                     "windows/Stop-BigBitesServer.ps1": "resources/windows/Stop-BigBitesServer.ps1",
-                                     "windows/Initialize-BigBites.ps1": "resources/windows/Initialize-BigBites.ps1",
-                                     "windows/node-runtime/node.exe": "resources/windows/node-runtime/node.exe",
-                                     "windows/node-runtime/LICENSE": "resources/windows/node-runtime/LICENSE"
-                                 },
                    "icon":  [
                                 "icons/32x32.png",
                                 "icons/128x128.png",

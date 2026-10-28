@@ -94,7 +94,7 @@ release-candidate workspace, not approved for client distribution.
 | Variant, payment, GST/report, and settings fields on installed target | PARTIAL / BLOCKED | The variants/split-payment migrations are absent from the target ledger; complete column/enum/constraint verification is still required on the isolated clone. |
 | Restorable backup verified against an isolated destination | NOT VERIFIED | No target-specific backup/restore rehearsal has occurred. Required next step: make a protected custom-format backup of `bigbites`, restore to a new uniquely named database, and compare sanitized counts/schema/ledger before repair rehearsal. |
 | Safe migration sequence | BLOCKED | The four later migrations are absent from the target ledger. Normal `migrate deploy` would encounter `20261020100000_remove_product_stock`, which drops required inventory columns and movement history. Do not run it; no production migration-history resolution is approved. |
-| Production database state | UNKNOWN | No production, Neon, Render, restaurant, or unidentified database was accessed. |
+| Production database state | UNKNOWN / BLOCKED | No production, Neon, Render, restaurant, or unidentified database was accessed. A read-only migration-history check declined to connect because the configured local server target did not identify the expected production database. |
 
 ## C. Inventory and stock
 
@@ -109,6 +109,24 @@ release-candidate workspace, not approved for client distribution.
 | Variant stock/price behavior | PASS, mocked/source | Canonical route tests cover variant pricing and variant-linked items. Schema/runtime target compatibility remains unknown. |
 | Admin deletion and cancellation stock restoration | PASS, mocked/source | Unpaid active-order deletion restores stock transactionally; deleting an already cancelled order does not restore it again. Completed/paid/refunded orders are not restored. |
 | Existing stock values preserved on target | PARTIAL / BLOCKED | `Product.stock` exists, but the target has zero Product rows. No values are present to reconstruct; keep the column and preserve the entire target database. |
+
+### Opening stock and combo policy
+
+The inventory migration gives legacy products a numeric `stock` default of
+zero but leaves `lastStockUpdatedAt` null. That null marker means “not
+initialized”: existing menu items remain orderable without stock limits until
+an administrator records an owner-confirmed physical count. Do not initialize
+counts from migration defaults or historic sample data. The repository's
+available backups do not establish current opening stock. The restaurant owner
+must provide the on-hand count for each item to track, its stock unit, and any
+desired low-stock threshold; an explicit count of zero marks an item out of
+stock. Uninitialized items remain unlimited until counted.
+
+Combo products are tracked as separate sellable stock-keeping units. Ordering
+two combos deducts two combo units and cancellation restores those same units.
+The displayed/snapshotted component list does not consume stock from the
+component products. The owner must provide an on-hand count for each combo
+product they want constrained.
 
 ## D. Orders and payments
 

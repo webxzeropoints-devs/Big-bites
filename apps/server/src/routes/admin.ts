@@ -1,6 +1,7 @@
 import { Router } from "express";
 import path from "node:path";
 import { Prisma, ProductClassification } from "@prisma/client";
+import { getComboDefinition } from "../catalog/comboCatalog.js";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
 import { calculateOrderAmounts, sumOrderAmounts } from "../utils/financial.js";
@@ -10,6 +11,7 @@ import {
   toRateBasisPoints,
 } from "../utils/currency.js";
 import { hashPassword } from "../utils/password.js";
+import { restoreOrderStock } from "../utils/inventory.js";
 import {
   exportAllOrderReports,
   exportMonthlyOrderReport,
@@ -40,6 +42,11 @@ type ProductionVariant = {
   price: string;
 };
 
+type ProductionComboItem = {
+  name: string;
+  quantity: number;
+};
+
 type ProductionProduct = {
   slug: string;
   name: string;
@@ -51,6 +58,7 @@ type ProductionProduct = {
   isSignature: boolean;
   categoryId: number;
   variants: ProductionVariant[];
+  comboItems: ProductionComboItem[] | null;
 };
 
 function usesInstalledLocalDatabase() {
@@ -101,6 +109,7 @@ async function getMissingCatalogSchemaColumns() {
       "isSignature",
       "isActive",
       "categoryId",
+      "comboItems",
     ],
     ProductVariant: ["id", "name", "price", "isActive", "productId"],
   };
@@ -233,6 +242,31 @@ async function fetchProductionMenu() {
       if (product.subcategory != null && !subcategory) {
         throw new Error(`Production menu contains an invalid subcategory for ${name}`);
       }
+      let comboItems: ProductionComboItem[] | null = null;
+      if (product.comboItems != null) {
+        if (!Array.isArray(product.comboItems) || product.comboItems.length === 0) {
+          throw new Error(`Production menu contains invalid combo items for ${name}`);
+        }
+        const comboItemNames = new Set<string>();
+        comboItems = product.comboItems.map((value) => {
+          if (!value || typeof value !== "object") {
+            throw new Error(`Production menu contains invalid combo items for ${name}`);
+          }
+          const item = value as Record<string, unknown>;
+          const itemName = text(item.name);
+          const quantity = Number(item.quantity);
+          if (
+            !itemName ||
+            !Number.isInteger(quantity) ||
+            quantity <= 0 ||
+            comboItemNames.has(itemName.toLocaleLowerCase())
+          ) {
+            throw new Error(`Production menu contains invalid combo items for ${name}`);
+          }
+          comboItemNames.add(itemName.toLocaleLowerCase());
+          return { name: itemName, quantity };
+        });
+      }
       productsBySlug.add(slug);
       normalizedProducts.push({
         slug,
@@ -246,6 +280,7 @@ async function fetchProductionMenu() {
         isSignature: product.isSignature === true,
         categoryId: category.id,
         variants,
+        comboItems,
       });
     }
 
@@ -325,7 +360,7 @@ router.post("/catalog/sync", async (_req, res) => {
   if (missingCatalogColumns.length > 0) {
     return res.status(409).json({
       message:
-        "The installed local schema cannot safely store the production catalog's variant prices. No catalog data was imported; apply an approved schema update before syncing.",
+        "The installed local schema cannot safely store the production catalog's variants or combo definitions. No catalog data was imported; apply an approved schema update before syncing.",
       missingColumns: missingCatalogColumns,
     });
   }
@@ -375,6 +410,7 @@ router.post("/catalog/sync", async (_req, res) => {
             isSignature: product.isSignature,
             isActive: true,
             categoryId,
+            comboItems: product.comboItems ?? Prisma.DbNull,
           };
           const localProduct = await tx.product.upsert({
             where: { slug: product.slug },
@@ -857,6 +893,8 @@ router.patch("/products/:id", async (req, res) => {
     subcategory?: string | null;
     isSignature?: boolean;
     isActive?: boolean;
+    stockUnit?: string;
+    lowStockThreshold?: number;
   } = {};
   if (req.body.name !== undefined) {
     const name = text(req.body.name);
@@ -902,6 +940,22 @@ router.patch("/products/:id", async (req, res) => {
   }
   if (typeof req.body.isSignature === "boolean") data.isSignature = req.body.isSignature;
   if (typeof req.body.isActive === "boolean") data.isActive = req.body.isActive;
+  if (req.body.stockUnit !== undefined) {
+    const stockUnit = text(req.body.stockUnit);
+    if (!stockUnit) {
+      return res.status(400).json({ message: "A valid stock unit is required" });
+    }
+    data.stockUnit = stockUnit;
+  }
+  if (req.body.lowStockThreshold !== undefined) {
+    const lowStockThreshold = Number(req.body.lowStockThreshold);
+    if (!Number.isInteger(lowStockThreshold) || lowStockThreshold < 0) {
+      return res.status(400).json({
+        message: "Low-stock threshold must be a non-negative integer",
+      });
+    }
+    data.lowStockThreshold = lowStockThreshold;
+  }
   const variants = req.body.variants === undefined ? undefined : parseVariants(req.body.variants);
   if (variants === null) {
     return res.status(400).json({ message: "Variants must have unique names and valid prices" });
@@ -916,6 +970,17 @@ router.patch("/products/:id", async (req, res) => {
       });
       if (!existing) {
         throw new Error("PRODUCT_NOT_FOUND");
+      }
+      const combo = getComboDefinition(existing.slug);
+      if (combo && data.name !== undefined && data.name !== combo.name) {
+        throw new Error("FIXED_COMBO_NAME");
+      }
+      if (
+        combo &&
+        data.price !== undefined &&
+        toMinorUnits(data.price, "Price") !== toMinorUnits(combo.price, "Combo price")
+      ) {
+        throw new Error("FIXED_COMBO_PRICE");
       }
       await tx.product.update({
         where: { id: productId },
@@ -959,6 +1024,16 @@ router.patch("/products/:id", async (req, res) => {
     if (error instanceof Error && error.message === "PRODUCT_NOT_FOUND") {
       return res.status(404).json({ message: "Product not found" });
     }
+    if (error instanceof Error && error.message === "FIXED_COMBO_PRICE") {
+      return res.status(409).json({
+        message: "Combo prices are fixed and cannot be changed through product editing",
+      });
+    }
+    if (error instanceof Error && error.message === "FIXED_COMBO_NAME") {
+      return res.status(409).json({
+        message: "Combo names are fixed and cannot be changed through product editing",
+      });
+    }
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       (error.code === "P2003" || error.code === "P2025")
@@ -968,6 +1043,113 @@ router.patch("/products/:id", async (req, res) => {
     return res.status(500).json({ message: "Unable to update product" });
   }
 });
+
+router.patch("/products/:id/stock", async (req, res) => {
+  const productId = id(req.params.id);
+  if (!productId) return res.status(400).json({ message: "Invalid product ID" });
+
+  const hasNewStock = req.body.newStock !== undefined;
+  const hasRestockQuantity = req.body.quantity !== undefined;
+  if (hasNewStock === hasRestockQuantity) {
+    return res.status(400).json({
+      message: "Provide exactly one of newStock or restock quantity",
+    });
+  }
+  const newStock = hasNewStock ? Number(req.body.newStock) : null;
+  const restockQuantity = hasRestockQuantity ? Number(req.body.quantity) : null;
+  if (
+    (newStock !== null && (!Number.isInteger(newStock) || newStock < 0)) ||
+    (restockQuantity !== null &&
+      (!Number.isInteger(restockQuantity) || restockQuantity <= 0))
+  ) {
+    return res.status(400).json({
+      message: "Stock must be a non-negative integer or restock quantity a positive integer",
+    });
+  }
+  const reason = typeof req.body.reason === "string" ? req.body.reason.trim() : "";
+  if (reason.length > 200) {
+    return res.status(400).json({ message: "Stock reason must be 200 characters or fewer" });
+  }
+
+  try {
+    const product = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT "id" FROM "Product" WHERE "id" = ${productId} FOR UPDATE
+      `;
+      const current = await tx.product.findUnique({
+        where: { id: productId },
+      });
+      if (!current) throw new Error("PRODUCT_NOT_FOUND");
+      if (current.lastStockUpdatedAt === null && newStock === null) {
+        throw new Error("STOCK_INITIALIZATION_REQUIRED");
+      }
+
+      const previousStock = current.stock;
+      const nextStock = newStock ?? previousStock + (restockQuantity ?? 0);
+      const initializing = current.lastStockUpdatedAt === null;
+      const updated = await tx.product.update({
+        where: { id: productId },
+        data: {
+          stock: nextStock,
+          lastStockUpdatedAt: new Date(),
+          ...(req.body.stockUnit === undefined
+            ? {}
+            : { stockUnit: text(req.body.stockUnit) ?? current.stockUnit }),
+          ...(req.body.lowStockThreshold === undefined
+            ? {}
+            : { lowStockThreshold: Number(req.body.lowStockThreshold) }),
+        },
+        include: { category: true, variants: { orderBy: { id: "asc" } } },
+      });
+
+      await tx.productStockMovement.create({
+        data: {
+          productId,
+          movementType: initializing
+            ? "INITIALIZATION"
+            : newStock !== null
+              ? "ADJUSTMENT"
+              : "RESTOCK",
+          quantity: initializing ? nextStock : nextStock - previousStock,
+          previousStock,
+          newStock: nextStock,
+          reason:
+            reason ||
+            (initializing
+              ? "Administrator initialized stock"
+              : newStock !== null
+                ? "Administrator adjusted stock"
+                : "Administrator restocked product"),
+        },
+      });
+      return updated;
+    });
+
+    return res.json({
+      ...product,
+      price: Number(product.price),
+      variants: product.variants.map((variant) => ({
+        ...variant,
+        price: Number(variant.price),
+      })),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "PRODUCT_NOT_FOUND") {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    if (
+      error instanceof Error &&
+      error.message === "STOCK_INITIALIZATION_REQUIRED"
+    ) {
+      return res.status(409).json({
+        message: "Set an explicit starting stock count before restocking this product",
+      });
+    }
+    console.error("Stock update error:", error);
+    return res.status(500).json({ message: "Unable to update stock" });
+  }
+});
+
 router.delete("/products/:id", async (req, res) => {
   const productId = id(req.params.id);
   if (!productId) return res.status(400).json({ message: "Invalid product ID" });
@@ -977,13 +1159,14 @@ router.delete("/products/:id", async (req, res) => {
       where: { id: productId },
       include: {
         orderItems: { select: { id: true } },
+        stockMovements: { select: { id: true } },
       },
     });
     if (!existing) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    if (existing.orderItems.length > 0) {
+    if (existing.orderItems.length > 0 || existing.stockMovements.length > 0) {
       const deactivated = await prisma.product.update({
         where: { id: productId },
         data: {
@@ -1062,13 +1245,6 @@ router.delete("/orders/:id", requireRoles("ADMIN"), async (req, res) => {
 
       await tx.$queryRaw`
         SELECT "id"
-        FROM "RestaurantTable"
-        WHERE "id" = ${order.tableId}
-        FOR UPDATE
-      `;
-
-      await tx.$queryRaw`
-        SELECT "id"
         FROM "Order"
         WHERE "id" = ${orderId}
         FOR UPDATE
@@ -1082,6 +1258,22 @@ router.delete("/orders/:id", requireRoles("ADMIN"), async (req, res) => {
       });
       if (!currentOrder) {
         throw new Error("ORDER_NOT_FOUND");
+      }
+
+      await tx.$queryRaw`
+        SELECT "id"
+        FROM "RestaurantTable"
+        WHERE "id" = ${currentOrder.tableId}
+        FOR UPDATE
+      `;
+
+      if (
+        currentOrder.status !== "CANCELLED" &&
+        currentOrder.status !== "COMPLETED" &&
+        currentOrder.payment?.status !== "PAID" &&
+        currentOrder.payment?.status !== "REFUNDED"
+      ) {
+        await restoreOrderStock(tx, orderId);
       }
 
       await tx.payment.deleteMany({ where: { orderId } });

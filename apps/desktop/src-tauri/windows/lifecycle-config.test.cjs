@@ -503,7 +503,7 @@ function Set-TestServerRootAcl {
   const script = [
     "param([string]$SourcePath, [string]$ServerRoot, [string]$RedirectTarget, [string]$InspectionPath, [string]$AclOwnerSid, [string]$AclOwnerPath, [string]$Mode, [string]$DatabaseCreatedByAttempt, [string]$DatabaseState, [string]$AppliedMigrations, [string]$PreviousPayloadId, [string]$NewPayloadId, [string]$StatePath, [string]$MigrationPath, [string]$ExpectedChecksum, [string]$MigrationName, [string]$MigrationChecksum)",
     "$ErrorActionPreference = 'Stop'",
-    "$databaseName = 'bigbites_client_local'",
+    "$databaseName = 'bigbites_client_local_delivery_20261027'",
     functions,
     redirectMock,
     copyFailureMock,
@@ -512,7 +512,7 @@ function Set-TestServerRootAcl {
     temporaryRootAclSetup,
     "if ($Mode -eq 'database-gate') {",
     "  $applied = @($AppliedMigrations -split ',' | Where-Object { $_ } | ForEach-Object { ($_ -split '\\|', 2)[0] })",
-    "  $expected = @('20260914084442_initial_hotel_pos', $MigrationName)",
+    "  $expected = @($MigrationName)",
     "  Assert-FreshDatabaseMigrationGate -DatabaseCreatedByAttempt ([bool]::Parse($DatabaseCreatedByAttempt)) -DatabaseState $DatabaseState -AppliedMigrations $applied -ExpectedMigrations $expected -MigrationName $MigrationName -MigrationChecksum $MigrationChecksum",
     "  Write-Output 'DATABASE_GATE_PASSED'",
     "  exit 0",
@@ -542,7 +542,7 @@ function Set-TestServerRootAcl {
     "}",
     "if ($Mode -eq 'migration-bytes') {",
     "  try {",
-    "    $bytes = Get-VerifiedInventoryRemovalMigrationBytes -Path $MigrationPath -ExpectedChecksum $ExpectedChecksum",
+    "    $bytes = Get-VerifiedClientBaselineMigrationBytes -Path $MigrationPath -ExpectedChecksum $ExpectedChecksum",
     "    Write-Output ('MIGRATION_BYTES=' + [Convert]::ToBase64String($bytes))",
     "    exit 0",
     "  } catch {",
@@ -671,10 +671,10 @@ function invokeStagingHarness(sourceRoot, serverRoot, options = {}) {
       "-ExpectedChecksum",
       options.expectedChecksum || "",
       "-MigrationName",
-      options.migrationName || "20261020101500_remove_product_stock",
+      options.migrationName || "20261027220000_initial_client_pos",
       "-MigrationChecksum",
       options.migrationChecksum ||
-        "98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751",
+        "af32ea70140e6f3de8f416b2ad8b40a798cc18551b5af8483ba701de6a1b403a",
     ],
     { encoding: "utf8", timeout: 30000 },
   );
@@ -717,15 +717,15 @@ test("local database URL safely encodes reserved password characters and preserv
   const script = [
     "$ErrorActionPreference = 'Stop'",
     localDatabaseUrlBuilderMatch[0],
-    "$databaseName = 'bigbites_client_local'",
-    "$legacyUrl = \"postgresql://bigbites_app:SafeTestPassword@127.0.0.1:5432/$databaseName?schema=public\"",
+    "$databaseName = 'bigbites_client_local_delivery_20261027'",
+    "$legacyUrl = \"postgresql://bigbites_client_delivery_app:SafeTestPassword@127.0.0.1:5432/$databaseName?schema=public\"",
     "if (([Uri]$legacyUrl).AbsolutePath -cne '/=public') { throw 'The previous interpolation failure was not reproduced.' }",
     "$password = 'SafeTest:@/?#%+&=Password'",
-    "$url = New-LocalDatabaseUrl -Password $password -DatabaseName 'bigbites_client_local'",
+    "$url = New-LocalDatabaseUrl -Password $password -DatabaseName 'bigbites_client_local_delivery_20261027'",
     "$uri = [Uri]$url",
     "$userInfo = $uri.UserInfo -split ':', 2",
     "if ([Uri]::UnescapeDataString($userInfo[1]) -cne $password) { throw 'The database URL changed its password.' }",
-    "if ([Uri]::UnescapeDataString($uri.AbsolutePath.TrimStart('/')) -cne 'bigbites_client_local') { throw 'The database URL changed its database name.' }",
+    "if ([Uri]::UnescapeDataString($uri.AbsolutePath.TrimStart('/')) -cne 'bigbites_client_local_delivery_20261027') { throw 'The database URL changed its database name.' }",
     "if ($uri.Query -cne '?schema=public') { throw 'The database URL changed its schema.' }",
     "Write-Output 'LOCAL_DATABASE_URL_VALIDATION_PASSED'",
   ].join("\r\n");
@@ -753,13 +753,13 @@ test("installer-owned retry repairs only the known PowerShell interpolation URL 
   const envPath = path.join(testRoot, ".env");
   fs.writeFileSync(
     envPath,
-    "DATABASE" + "_URL=postgresql://bigbites_app:old@127.0.0.1:5432/=public\r\nAUTH_SECRET" + "=keep-this-line\r\n",
+    "DATABASE" + "_URL=postgresql://bigbites_client_delivery_app:old@127.0.0.1:5432/=public\r\nAUTH_SECRET" + "=keep-this-line\r\n",
     "ascii",
   );
   const script = [
     "$ErrorActionPreference = 'Stop'",
     localDatabaseUrlEnvironmentWriterMatch[0],
-    "$newUrl = 'postgresql://bigbites_app:encoded@127.0.0.1:5432/bigbites_client_local?schema=public'",
+    "$newUrl = 'postgresql://bigbites_client_delivery_app:encoded@127.0.0.1:5432/bigbites_client_local_delivery_20261027?schema=public'",
     `Set-LocalDatabaseUrlInEnvironment -Path '${envPath.replace(/'/g, "''")}' -DatabaseUrl $newUrl`,
     `$lines = [System.IO.File]::ReadAllLines('${envPath.replace(/'/g, "''")}')`,
     "if ($lines.Count -ne 2 -or $lines[0] -cne (('DATABASE' + '_URL=') + $newUrl) -or $lines[1] -cne ('AUTH_SECRET' + '=keep-this-line')) { throw 'The local config repair changed unrelated settings.' }",
@@ -791,7 +791,7 @@ test("Prisma resolves the configured local database and public schema from the i
       encoding: "utf8",
       timeout: 60000,
       env: {
-        DATABASE_URL: "postgresql://bigbites_app:SafeTestPasswordNoReservedChars@127.0.0.1:1/bigbites_client_local?schema=public",
+        DATABASE_URL: "postgresql://bigbites_client_delivery_app:SafeTestPasswordNoReservedChars@127.0.0.1:1/bigbites_client_local_delivery_20261027?schema=public",
         PGOPTIONS: "-c statement_timeout=300000 -c lock_timeout=30000",
         TEMP: os.tmpdir(),
         TMP: os.tmpdir(),
@@ -800,7 +800,7 @@ test("Prisma resolves the configured local database and public schema from the i
   );
   const output = `${result.stdout || ""}\n${result.stderr || ""}`;
   assert.equal(result.status, 1, output);
-  assert.match(output, /PostgreSQL database "bigbites_client_local", schema "public" at "127\.0\.0\.1:1"/);
+  assert.match(output, /PostgreSQL database "bigbites_client_local_delivery_20261027", schema "public" at "127\.0\.0\.1:1"/);
   assert.match(output, /P1001: Can't reach database server/);
   assert.doesNotMatch(output, /database "=public"/);
 });
@@ -819,7 +819,7 @@ test("backend staging helper declares a complete package and Prisma validation c
   assert.ok(files.includes("prisma.config.ts"));
   assert.ok(
     files.includes(
-      "prisma\\migrations\\20261013213000_add_product_stock_movements\\migration.sql",
+      "prisma\\client-migrations\\20261027220000_initial_client_pos\\migration.sql",
     ),
   );
   assert.ok(files.includes("node_modules\\.prisma\\client\\index.js"));
@@ -976,7 +976,7 @@ test("copy failure removes its operation directory and preserves sibling data", 
   assert.equal(fs.readFileSync(path.join(stagingRoot, "sibling", "keep.txt"), "utf8"), "keep");
 });
 
-test("stock-removal migration is blocked for an existing database", (context) => {
+test("the client baseline is blocked for a database not created by this install", (context) => {
   const fixtureRoot = createTestRoot("bigbites-existing-database-gate-");
   const serverRoot = path.join(fixtureRoot, "server");
   const databaseFixture = path.join(fixtureRoot, "database-state.txt");
@@ -987,14 +987,17 @@ test("stock-removal migration is blocked for an existing database", (context) =>
   const result = invokeStagingHarness("", serverRoot, {
     mode: "database-gate",
     databaseCreatedByAttempt: false,
-    databaseState: "bigbites_client_local|127.0.0.1|5432|12|present",
+    databaseState: "bigbites_client_local_delivery_20261027|127.0.0.1|5432|12|present",
   });
   if (result.unavailable) {
     context.skip("Windows PowerShell is unavailable; database-gate fixture not run.");
     return;
   }
   assert.notEqual(result.status, 0, result.output);
-  assert.match(result.output, /installation attempt did not create the database/);
+  assert.match(
+    result.output.replace(/\s+/g, " "),
+    /installation attempt did not create the database/,
+  );
   assert.equal(fs.readFileSync(databaseFixture, "utf8"), "existing-business-data");
 });
 
@@ -1032,7 +1035,7 @@ test("missing network endpoint CIM providers fall back to netstat without changi
   assert.match(result.output, /NETSTAT_PROVIDER_FALLBACK_PASSED/);
 });
 
-test("fresh setup resolves the verified stock-removal migration without running its SQL", (context) => {
+test("fresh setup verifies the stock-free client baseline migration", (context) => {
   const fixtureRoot = createTestRoot("bigbites-fresh-database-gate-");
   const serverRoot = path.join(fixtureRoot, "server");
   context.after(() => removeTemporaryRoot(fixtureRoot));
@@ -1041,7 +1044,7 @@ test("fresh setup resolves the verified stock-removal migration without running 
   const result = invokeStagingHarness("", serverRoot, {
     mode: "database-gate",
     databaseCreatedByAttempt: true,
-    databaseState: "bigbites_client_local|127.0.0.1|5432|0|absent",
+    databaseState: "bigbites_client_local_delivery_20261027|127.0.0.1|5432|0|absent",
   });
   if (result.unavailable) {
     context.skip("Windows PowerShell is unavailable; database-gate fixture not run.");
@@ -1053,28 +1056,43 @@ test("fresh setup resolves the verified stock-removal migration without running 
   const resolvedRetry = invokeStagingHarness("", serverRoot, {
     mode: "database-gate",
     databaseCreatedByAttempt: true,
-    databaseState: "bigbites_client_local|127.0.0.1|5432|0|present",
+    databaseState: "bigbites_client_local_delivery_20261027|127.0.0.1|5432|0|present",
     appliedMigrations:
-      "20261020101500_remove_product_stock|98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751",
+      "20261027220000_initial_client_pos|af32ea70140e6f3de8f416b2ad8b40a798cc18551b5af8483ba701de6a1b403a",
   });
   assert.equal(resolvedRetry.status, 0, resolvedRetry.output);
 
   for (const gateOverride of [
-    { migrationName: "20261020100000_remove_product_stock" },
-    { migrationChecksum: "0".repeat(64) },
+    { migrationName: "20261020101500_remove_product_stock" },
+    { migrationChecksum: "invalid" },
   ]) {
     const rejected = invokeStagingHarness("", serverRoot, {
       mode: "database-gate",
       databaseCreatedByAttempt: true,
-      databaseState: "bigbites_client_local|127.0.0.1|5432|0|absent",
+      databaseState: "bigbites_client_local_delivery_20261027|127.0.0.1|5432|0|absent",
       ...gateOverride,
     });
     assert.notEqual(rejected.status, 0, rejected.output);
     assert.match(
-      rejected.output,
-      /does not match the verified stock-removal migration identity and checksum/,
+      rejected.output.replace(/\s+/g, " "),
+      /does not match the packaged local-client baseline identity and checksum/,
     );
   }
+});
+
+test("client initialization writes a unique menu import report and restores its environment", () => {
+  assert.match(
+    initializer,
+    /menu-import-report-\{0\}\.json[\s\S]*?BIGBITES_MENU_IMPORT_REPORT = \$menuImportReportPath/,
+  );
+  assert.match(
+    initializer,
+    /\$previousMenuImportReportPath = \$env:BIGBITES_MENU_IMPORT_REPORT/,
+  );
+  assert.match(
+    initializer,
+    /\$env:BIGBITES_MENU_IMPORT_REPORT = \$previousMenuImportReportPath/,
+  );
 });
 
 test("fresh migration gate resumes an installation-created database with package history", (context) => {
@@ -1086,9 +1104,9 @@ test("fresh migration gate resumes an installation-created database with package
   const resumable = invokeStagingHarness("", serverRoot, {
     mode: "database-gate",
     databaseCreatedByAttempt: true,
-    databaseState: "bigbites_client_local|127.0.0.1|5432|3|present",
+    databaseState: "bigbites_client_local_delivery_20261027|127.0.0.1|5432|3|present",
     appliedMigrations:
-      "20261020101500_remove_product_stock|98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751",
+      "20261027220000_initial_client_pos|af32ea70140e6f3de8f416b2ad8b40a798cc18551b5af8483ba701de6a1b403a",
   });
   if (resumable.unavailable) {
     context.skip("Windows PowerShell is unavailable; database-gate fixture not run.");
@@ -1100,7 +1118,7 @@ test("fresh migration gate resumes an installation-created database with package
   const untrackedObjects = invokeStagingHarness("", serverRoot, {
     mode: "database-gate",
     databaseCreatedByAttempt: true,
-    databaseState: "bigbites_client_local|127.0.0.1|5432|3|absent",
+    databaseState: "bigbites_client_local_delivery_20261027|127.0.0.1|5432|3|absent",
   });
   assert.notEqual(untrackedObjects.status, 0, untrackedObjects.output);
   assert.match(untrackedObjects.output, /without a migration ledger/);
@@ -1140,15 +1158,13 @@ test("preflight migration ledger entries are parsed before the retry gate", (con
   const script = [
     "$ErrorActionPreference = 'Stop'",
     freshMigrationNamesConverterMatch[0],
-    "$checksum = '98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751'",
-    "$expected = @('20260914084442_initial_hotel_pos', '20261020101500_remove_product_stock')",
-    "$names = @(ConvertTo-FreshDatabaseMigrationNames -MigrationEntries @('20261020101500_remove_product_stock|' + $checksum) -ExpectedMigrations $expected -InventoryRemovalMigrationName '20261020101500_remove_product_stock' -InventoryRemovalSourceMigrationName '20261020100000_remove_product_stock' -InventoryRemovalMigrationChecksum $checksum -InventoryRemovalSafeMigrationChecksum $checksum)",
-    "if ($names.Count -ne 1 -or $names[0] -cne '20261020101500_remove_product_stock') { throw 'A normal Prisma name|checksum row was not parsed.' }",
-    "$legacyNames = @(ConvertTo-FreshDatabaseMigrationNames -MigrationEntries @('20261020100000_remove_product_stock|' + $checksum) -ExpectedMigrations $expected -InventoryRemovalMigrationName '20261020101500_remove_product_stock' -InventoryRemovalSourceMigrationName '20261020100000_remove_product_stock' -InventoryRemovalMigrationChecksum $checksum -InventoryRemovalSafeMigrationChecksum $checksum)",
-    "if ($legacyNames.Count -ne 1 -or $legacyNames[0] -cne '20261020101500_remove_product_stock') { throw 'The verified legacy migration identity was not normalized.' }",
+    "$checksum = 'af32ea70140e6f3de8f416b2ad8b40a798cc18551b5af8483ba701de6a1b403a'",
+    "$expected = @('20261027220000_initial_client_pos')",
+    "$names = @(ConvertTo-FreshDatabaseMigrationNames -MigrationEntries @('20261027220000_initial_client_pos|' + $checksum) -ExpectedMigrations $expected -InventoryRemovalMigrationName '20261027220000_initial_client_pos' -InventoryRemovalSourceMigrationName '20261027220000_initial_client_pos' -InventoryRemovalMigrationChecksum $checksum -InventoryRemovalSafeMigrationChecksum $checksum)",
+    "if ($names.Count -ne 1 -or $names[0] -cne '20261027220000_initial_client_pos') { throw 'The client baseline name|checksum row was not parsed.' }",
     "$rejected = $false",
-    "try { ConvertTo-FreshDatabaseMigrationNames -MigrationEntries @('20261020101500_remove_product_stock|' + ('0' * 64)) -ExpectedMigrations $expected -InventoryRemovalMigrationName '20261020101500_remove_product_stock' -InventoryRemovalSourceMigrationName '20261020100000_remove_product_stock' -InventoryRemovalMigrationChecksum $checksum -InventoryRemovalSafeMigrationChecksum $checksum | Out-Null } catch { $rejected = $true }",
-    "if (-not $rejected) { throw 'An unknown stock-removal checksum was accepted.' }",
+    "try { ConvertTo-FreshDatabaseMigrationNames -MigrationEntries @('20261027220000_initial_client_pos|' + ('0' * 64)) -ExpectedMigrations $expected -InventoryRemovalMigrationName '20261027220000_initial_client_pos' -InventoryRemovalSourceMigrationName '20261027220000_initial_client_pos' -InventoryRemovalMigrationChecksum $checksum -InventoryRemovalSafeMigrationChecksum $checksum | Out-Null } catch { $rejected = $true }",
+    "if (-not $rejected) { throw 'An unknown client baseline checksum was accepted.' }",
     "Write-Output 'FRESH_MIGRATION_LEDGER_PARSER_PASSED'",
   ].join("\r\n");
   fs.writeFileSync(scriptPath, script, "utf8");
@@ -1174,7 +1190,7 @@ test("fresh migration gate rejects an installation-created database with unrelat
   const result = invokeStagingHarness("", serverRoot, {
     mode: "database-gate",
     databaseCreatedByAttempt: true,
-    databaseState: "bigbites_client_local|127.0.0.1|5432|0|absent",
+    databaseState: "bigbites_client_local_delivery_20261027|127.0.0.1|5432|0|absent",
     appliedMigrations:
       "20260913000000_unrelated|0000000000000000000000000000000000000000000000000000000000000000",
   });
@@ -1186,18 +1202,18 @@ test("fresh migration gate rejects an installation-created database with unrelat
   assert.match(result.output, /unexpected migration history/);
 });
 
-test("stock-removal migration must match the verified SQL checksum after line-ending normalization", (context) => {
-  const fixtureRoot = createTestRoot("bigbites-migration-checksum-");
+test("the client baseline must match its packaged SQL checksum after line-ending normalization", (context) => {
+  const fixtureRoot = createTestRoot("bigbites-client-baseline-checksum-");
   const sourceMigration = path.join(
     serverDirectory,
     "prisma",
-    "migrations",
-    "20261020100000_remove_product_stock",
+    "client-migrations",
+    "20261027220000_initial_client_pos",
     "migration.sql",
   );
   const tamperedMigration = path.join(fixtureRoot, "tampered-migration.sql");
   const checksum =
-    "98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751";
+    "af32ea70140e6f3de8f416b2ad8b40a798cc18551b5af8483ba701de6a1b403a";
   context.after(() => removeTemporaryRoot(fixtureRoot));
   fs.mkdirSync(fixtureRoot, { recursive: true });
 
@@ -1220,7 +1236,7 @@ test("stock-removal migration must match the verified SQL checksum after line-en
   );
   assert.equal(normalizedBytes.includes(Buffer.from("\r\n")), false);
 
-  const tamperedSql = read(sourceMigration).replace("DROP TABLE", "DROP VIEW");
+  const tamperedSql = read(sourceMigration).replace("CREATE SCHEMA", "CREATE SCHEMA altered");
   fs.writeFileSync(tamperedMigration, tamperedSql, "utf8");
   const rejected = invokeStagingHarness("", fixtureRoot, {
     mode: "migration-bytes",
@@ -1228,7 +1244,7 @@ test("stock-removal migration must match the verified SQL checksum after line-en
     expectedChecksum: checksum,
   });
   assert.notEqual(rejected.status, 0, rejected.output);
-  assert.match(rejected.output, /does not match the verified historical SQL checksum/);
+  assert.match(rejected.output, /does not match its packaged checksum/);
 });
 
 test("failed setup before database creation persists owned-role state for safe retry", (context) => {
@@ -1280,7 +1296,7 @@ test("fresh-install resource checkpoints bracket role and database creation", ()
     "$installState.roleCreationStarted = $true",
   );
   const roleCreation = installer.indexOf(
-    'Invoke-Psql "CREATE ROLE bigbites_app LOGIN PASSWORD',
+    'Invoke-Psql "CREATE ROLE bigbites_client_delivery_app LOGIN PASSWORD',
   );
   const roleRecorded = installer.indexOf(
     "$installState.roleCreatedByAttempt = $true",
@@ -1291,7 +1307,7 @@ test("fresh-install resource checkpoints bracket role and database creation", ()
     roleRecorded,
   );
   const databaseCreation = installer.indexOf(
-    'Invoke-Psql "CREATE DATABASE $databaseName OWNER bigbites_app"',
+    'Invoke-Psql "CREATE DATABASE $databaseName OWNER bigbites_client_delivery_app"',
     databaseAttemptStarted,
   );
   const databaseRecorded = installer.indexOf(
@@ -1510,88 +1526,18 @@ test("redirected staging path fails closed before recursive cleanup", (context) 
   assert.equal(fs.readFileSync(path.join(externalRoot, "keep.txt"), "utf8"), "keep");
 });
 
-test("Tauri resources match installer and lifecycle script paths", () => {
-  const resources = tauriConfig.bundle.resources;
-  assert.equal(resources["../../server/dist/"], "resources/server/dist/");
-  assert.equal(
-    resources["../../server/.windows-runtime/node_modules/"],
-    "resources/server/node_modules/",
-  );
-  assert.equal(
-    resources["../../server/prisma/schema.prisma"],
-    "resources/server/prisma/schema.prisma",
-  );
-  assert.equal(
-    resources["../../server/prisma/migrations/"],
-    "resources/server/prisma/migrations/",
-  );
-  assert.equal(
-    resources["../../server/prisma/seed/"],
-    "resources/server/prisma/seed/",
-  );
-  assert.equal(
-    resources["../../server/prisma.config.ts"],
-    "resources/server/prisma.config.ts",
-  );
-  assert.equal(
-    resources["windows/Install-BigBites.ps1"],
-    "resources/windows/Install-BigBites.ps1",
-  );
-  assert.equal(
-    resources["windows/Start-BigBitesServer.ps1"],
-    "resources/windows/Start-BigBitesServer.ps1",
-  );
-  assert.equal(
-    resources["windows/Stop-BigBitesServer.ps1"],
-    "resources/windows/Stop-BigBitesServer.ps1",
-  );
-  assert.equal(
-    resources["windows/Initialize-BigBites.ps1"],
-    "resources/windows/Initialize-BigBites.ps1",
-  );
-  assert.equal(
-    resources["windows/node-runtime/node.exe"],
-    "resources/windows/node-runtime/node.exe",
-  );
-  assert.equal(
-    resources["windows/node-runtime/LICENSE"],
-    "resources/windows/node-runtime/LICENSE",
-  );
-  assert.match(
+test("desktop installer launches the cloud client without provisioning a local server", () => {
+  assert.equal(tauriConfig.build.beforeBuildCommand, "npm run build");
+  assert.equal(tauriConfig.bundle.resources, undefined);
+  assert.match(nsis, /!macro NSIS_HOOK_PREUNINSTALL\s+!macroend/);
+  assert.match(nsis, /ExecShell "" "\$INSTDIR\\desktop\.exe"/);
+  assert.doesNotMatch(
     nsis,
-    /resources\\windows\\Install-BigBites\.ps1/,
+    /Install-BigBites|Start-BigBitesServer|Stop-BigBitesServer|resources\\server|PostgreSQL/i,
   );
-  assert.match(
-    nsis,
-    /resources\\windows\\Stop-BigBitesServer\.ps1/,
-  );
-  assert.match(
-    nsis,
-    /resources\\windows\\node-runtime\\node\.exe/,
-  );
-  assert.match(
-    nsis,
-    /-ServerSourcePath "\$INSTDIR\\resources\\server"/,
-  );
-  assert.match(nsis, /nsExec::ExecToLog \/TIMEOUT=7200000/);
-  assert.match(nsis, /Pop \$0\s+StrCmp \$0 "error" setup_launch_failed\s+StrCmp \$0 "timeout" setup_timed_out/);
-  assert.match(nsis, /setup_timed_out:\s+MessageBox MB_ICONSTOP .*2-hour setup limit/);
-  assert.match(installer, /\$installerProcess\.WaitForExit\(30000\)/);
-  assert.match(installer, /PostgreSQL installer is still running/);
-  assert.match(installer, /PGCONNECT_TIMEOUT = "15"/);
-  assert.match(installer, /statement_timeout=300000 -c lock_timeout=30000/);
-  for (const resource of [
-    "../../server/prisma/schema.prisma",
-    "../../server/prisma/migrations/",
-    "../../server/prisma/seed/",
-    "../../server/prisma.config.ts",
-    "windows/Initialize-BigBites.ps1",
-  ]) {
-    assert.ok(resources[resource], `Missing packaged resource ${resource}`);
-  }
 });
 
-test("installer validates packaged server paths with PowerShell-compatible syntax", () => {
+test("legacy local bootstrap validates server paths with PowerShell-compatible syntax", () => {
   assert.match(
     installer,
     /\$hasBundledServer = \(\s*\(Test-Path -LiteralPath \$ServerSourcePath\)\s*-and\s*\(Test-Path -LiteralPath \(Join-Path \$ServerSourcePath "dist\\server\.js"\)\)\s*\)/,
@@ -1602,14 +1548,14 @@ test("installer validates packaged server paths with PowerShell-compatible synta
   );
 });
 
-test("Windows runtime packaging installs production dependencies in an isolated resource tree", () => {
+test("Windows runtime helper remains isolated from the cloud-client desktop build", () => {
   assert.equal(
     serverPackage.scripts["prepare:windows-runtime"],
     "node scripts/prepare-windows-runtime.cjs",
   );
-  assert.match(
+  assert.doesNotMatch(
     tauriConfig.build.beforeBuildCommand,
-    /npm --prefix \.\.\/server run prepare:windows-runtime$/,
+    /server|prepare:windows-runtime/,
   );
   assert.match(
     windowsRuntimePreparer,
@@ -1635,83 +1581,37 @@ test("Windows runtime packaging installs production dependencies in an isolated 
   assert.match(windowsRuntimePreparer, /renameSync\(stageRoot, outputRoot\)/);
 });
 
-test("installer deploys ordered migrations with a verified no-op stock-removal migration", () => {
+test("legacy local bootstrap deploys a stock-free client baseline", () => {
   assert.ok(migrationSafetyGuard >= 0);
   assert.ok(stopExistingServerCall > migrationSafetyGuard);
-  assert.match(
-    installer,
-    /stock-removal migration identity and checksum/,
-  );
-  assert.match(installer, /Get-VerifiedInventoryRemovalMigrationBytes/);
-  assert.match(
-    installer,
-    /\$inventoryRemovalSafeMigrationSql = "-- Historical stock-removal migration intentionally disabled for local BIG BITES installs\./,
-  );
-  assert.match(
-    installer,
-    /\[System\.IO\.File\]::WriteAllBytes\(\s*\$stagedInventoryRemovalSqlPath,\s*\$inventoryRemovalSafeMigrationBytes\s*\)/,
-  );
-  assert.match(installer, /\$inventoryRemovalSafeMigrationChecksum/);
+  assert.match(installer, /\$clientBaselineMigrationName = "20261027220000_initial_client_pos"/);
+  assert.match(installer, /Get-VerifiedClientBaselineMigrationBytes/);
+  assert.match(installer, /prisma\\client-migrations/);
+  assert.match(installer, /\$env:BIGBITES_LOCAL_CLIENT_MIGRATIONS = "1"/);
+  assert.match(installer, /The stock-free local-client baseline migration was applied and verified/);
+  assert.match(installer, /fresh local database schema was verified as stock-free/);
   assert.doesNotMatch(installer, /migrate resolve/);
-  assert.match(
-    installer,
-    /migrate deploy[\s\S]*?Database migrations completed in package order; the stock-removal migration ran only as its verified comment-only replacement/,
-  );
   assert.ok(
-    installer.indexOf("migrate deploy") < installer.indexOf("$inventoryRepairSql = @'"),
-    "inventory verification/repair must happen only after ordered migration deployment",
+    installer.indexOf("$migrationSql -match $destructiveInventorySql") <
+      stopExistingServerCall,
+    "baseline SQL is checked before stopping the active server",
   );
-  assert.match(installer, /\[System\.IO\.File\]::WriteAllBytes\(/);
-  assert.match(installer, /The packaged migration set contains a stock-removal migration that cannot be applied to an existing database/);
-  assert.match(installer, /packaged Prisma schema does not define the Product model/);
-  assert.match(installer, /packaged Prisma schema does not preserve stock-movement history/);
-  assert.match(installer, /"stockUnit",\s*"lowStockThreshold",\s*"lastStockUpdatedAt"/);
-  assert.match(installer, /present\|4\|present/g);
-  const inventoryRepairSql = installer.match(
-    /\$inventoryRepairSql = @'([\s\S]*?)'@/,
-  );
-  assert.ok(inventoryRepairSql, "installer must define the guarded additive inventory repair");
-  assert.match(inventoryRepairSql[1], /BEGIN;[\s\S]*?COMMIT;/);
-  assert.match(
-    inventoryRepairSql[1],
-    /to_regclass\('public\."Product"'\) IS NULL[\s\S]*?stock[\s\S]*?RAISE EXCEPTION/,
-  );
-  assert.match(inventoryRepairSql[1], /ALTER TABLE public\."Product"/);
-  assert.match(inventoryRepairSql[1], /ADD COLUMN IF NOT EXISTS "stockUnit"/);
-  assert.match(
-    inventoryRepairSql[1],
-    /CREATE TABLE IF NOT EXISTS public\."ProductStockMovement"/,
-  );
-  assert.match(
-    inventoryRepairSql[1],
-    /ALTER TABLE public\."ProductStockMovement"[\s\S]*?REFERENCES public\."Product"\("id"\)/,
-  );
-  assert.doesNotMatch(
-    inventoryRepairSql[1],
-    /(?:ALTER TABLE|CREATE TABLE IF NOT EXISTS|REFERENCES)\s+"(?:Product|ProductStockMovement)"/,
-  );
-  assert.doesNotMatch(
-    inventoryRepairSql[1],
-    /\b(?:DROP\s+(?:TABLE|COLUMN)|TRUNCATE|DELETE\s+FROM|UPDATE\s+"Product")\b/i,
-  );
-  assert.match(installer, /Product\.stock quantities are preserved/);
-  assert.match(installer, /column_name = 'stock'\) THEN 'safe' ELSE 'unsafe' END/);
-  assert.match(installer, /\$migrationSql -match \$destructiveInventorySql/);
+  assert.match(installer, /packaged Prisma schema unexpectedly contains stock or inventory models/);
+  assert.match(installer, /clientSchemaState\.Trim\(\) -ne "present\|0"/);
+  assert.match(installer, /finalClientSchemaState\.Trim\(\) -ne "present\|0"/);
+  assert.doesNotMatch(installer, /CREATE TABLE IF NOT EXISTS public\."ProductStockMovement"/);
+  assert.doesNotMatch(installer, /inventoryRepairSql|Repairing only missing inventory schema/);
   assert.match(installer, /Get-FileHash -LiteralPath \$migrationPath -Algorithm SHA256/);
   assert.match(installer, /\$packageChecksum -ine \$appliedMigrationChecksums\[\$migrationName\]/);
-  assert.match(
-    installer,
-    /if \(\$inventoryRemovalMigrationName -in \$pendingMigrations\)\s*\{\s*throw "The packaged migration set contains a stock-removal migration that cannot be applied to an existing database\."/,
-  );
   assert.match(installer, /existing database has unapplied migrations/);
   assert.match(installer, /databaseCreatedByAttempt = \$false/);
-  assert.match(installer, /\$databaseName = "bigbites_client_local"/);
+  assert.match(installer, /\$databaseName = "bigbites_client_local_delivery_20261027"/);
   assert.match(installer, /COMMENT ON DATABASE \$databaseName IS '\$attemptMarker'/);
   assert.match(installer, /The local \$databaseName database exists but cannot be positively tied to this installation attempt/);
-  assert.match(initializer, /\$databaseName -ne "bigbites_client_local"/);
+  assert.match(initializer, /\$databaseName -ne "bigbites_client_local_delivery_20261027"/);
 });
 
-test("unconfigured database and role conflicts fail before server shutdown", () => {
+test("legacy local bootstrap rejects unconfigured database conflicts", () => {
   const resourcePreflight = installer.indexOf(
     "if (-not ($hasExistingEnvironment -and -not $isResumingInstall))",
   );
@@ -1740,7 +1640,7 @@ test("unconfigured database and role conflicts fail before server shutdown", () 
   );
 });
 
-test("existing PostgreSQL data must match the protected BIG BITES ownership journal before upgrades", () => {
+test("legacy local bootstrap validates its PostgreSQL ownership journal", () => {
   const ownershipJournalCheck = installer.indexOf(
     "The local installation ownership journal is missing or incomplete",
   );
@@ -1760,76 +1660,17 @@ test("existing PostgreSQL data must match the protected BIG BITES ownership jour
   );
 });
 
-test("backend build output and runtime resources are packaged and copied", () => {
-  const resources = tauriConfig.bundle.resources;
-  const backendResourceEntries = Object.entries(resources).filter(
-    ([source]) => source.startsWith("../../server/"),
-  );
-
-  assert.ok(backendResourceEntries.length > 0);
-  for (const [source, destination] of backendResourceEntries) {
-    const sourcePath = path.resolve(tauriDirectory, source);
-    assert.ok(
-      fs.existsSync(sourcePath),
-      `Declared Tauri backend source is missing: ${source}`,
-    );
-    assert.ok(
-      destination.startsWith("resources/server/"),
-      `Backend resource is not placed under resources/server/: ${destination}`,
-    );
-  }
-
-  const normalizedInstaller = normalizePowerShellContinuations(installer);
-  const { helper } = getStagingManifest();
-  const normalizedMigrationGuard = normalizedInstaller.indexOf(
-    "$migrationSql -match $destructiveInventorySql",
-  );
-  assert.match(normalizedInstaller, /Stage-ServerPayload\s+-SourcePath \$ServerSourcePath\s+-ServerRoot \$serverDir/);
-  assert.match(normalizedInstaller, /\[System\.IO\.Directory\]::Move\(\$stagedServerPath, \$script:candidatePayloadPath\)/);
-  assert.match(helper, /Copy-Item[\s\S]*?Join-Path \$SourcePath \$directory/);
+test("desktop bundle contains no backend, migration, or local database payload", () => {
+  assert.equal(tauriConfig.bundle.resources, undefined);
+  assert.equal(tauriConfig.build.beforeBuildCommand, "npm run build");
   assert.doesNotMatch(
-    normalizedInstaller,
-    /Remove-Item -LiteralPath \$payloadPath -Recurse -Force/,
-  );
-  assert.ok(
-    normalizedInstaller.indexOf("Stage-ServerPayload `") <
-      normalizedInstaller.indexOf("Stop-ExistingServer", normalizedMigrationGuard),
-    "the complete staged payload must exist before stopping the active server",
-  );
-
-  assert.match(
     tauriConfig.build.beforeBuildCommand,
-    /npm run build && npm --prefix \.\.\/server run build/,
+    /server|prisma|migration|postgres/i,
   );
-  assert.match(serverPackage.scripts.build, /scripts\/build\.cjs/);
-  assert.match(serverBuild, /prismaCli[\s\S]*"generate"/);
-  assert.match(serverBuild, /typeScriptCli[\s\S]*tsc/);
-  assert.match(
-    normalizedInstaller,
-    /Test-Path -LiteralPath \(Join-Path \$payloadPath "dist\\server\.js"\) -PathType Leaf/,
-  );
-  assert.match(
-    normalizedInstaller,
-    /Join-Path \$script:candidatePayloadPath "node_modules\\prisma\\build\\index\.js"/,
-  );
-  assert.ok(
-    fs.existsSync(path.join(serverDirectory, "dist", "server.js")),
-    "Current build output must contain the compiled server entry.",
-  );
-  for (const runtimePath of [
-    "node_modules/@prisma/client/package.json",
-    "node_modules/.prisma/client/index.js",
-    "node_modules/@prisma/engines",
-    "node_modules/prisma/build/index.js",
-  ]) {
-    assert.ok(
-      fs.existsSync(path.join(serverDirectory, runtimePath)),
-      `Required Prisma runtime source path is missing: ${runtimePath}`,
-    );
-  }
+  assert.doesNotMatch(nsis, /Install-BigBites|resources\\server|prisma|migrate/i);
 });
 
-test("installer, startup, and shutdown agree on local server paths", () => {
+test("legacy local server helpers are not shipped by the cloud installer", () => {
   assert.match(installer, /\$taskName = "BigBitesPosServer"/);
   assert.match(installer, /\$serverDir = Join-Path \$dataRoot "server"/);
   assert.match(installer, /-TaskPath "\\"/);
@@ -1932,18 +1773,10 @@ test("installer, startup, and shutdown agree on local server paths", () => {
   assert.match(stopper, /Get-BigBitesServerProcesses/);
   assert.match(stopper, /Unregister-ScheduledTask/);
   assert.match(stopper, /A task named \$taskName exists[\s\S]*?left unchanged/);
-  assert.equal(
-    tauriConfig.bundle.resources["windows/Start-BigBitesServer.ps1"],
-    "resources/windows/Start-BigBitesServer.ps1",
-  );
-  assert.equal(
-    tauriConfig.bundle.resources["windows/Stop-BigBitesServer.ps1"],
-    "resources/windows/Stop-BigBitesServer.ps1",
-  );
-  assert.match(nsis, /resources\\windows\\Stop-BigBitesServer\.ps1/);
-  assert.match(
+  assert.equal(tauriConfig.bundle.resources, undefined);
+  assert.doesNotMatch(
     nsis,
-    /-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "\$INSTDIR\\resources\\windows\\Install-BigBites\.ps1"/,
+    /Install-BigBites|Start-BigBitesServer|Stop-BigBitesServer|resources\\server/i,
   );
   assert.ok(
     migrationSafetyGuard >= 0 &&
@@ -1978,19 +1811,17 @@ test("PostgreSQL installer verifies its official download and keeps credentials 
   assert.doesNotMatch(installer, /winget/i);
 });
 
-test("uninstall failure paths do not stop PostgreSQL or delete user data", () => {
+test("cloud installer leaves existing local services and data untouched", () => {
   assert.doesNotMatch(stopper, /\b(?:Stop-Service|Restart-Service)\b/i);
   assert.doesNotMatch(stopper, /\b(?:Remove-Item|Remove-ItemProperty|Remove-Database)\b/i);
   assert.doesNotMatch(stopper, /\b(?:psql|pg_dump|pg_restore|migrate deploy)\b/i);
   assert.match(stopper, /Stop-Process -Id \$process\.ProcessId -Force/);
   assert.match(stopper, /Unregister-ScheduledTask/);
-  assert.match(
-    nsis,
-    /uninstall_cleanup_failed:[\s\S]*?Uninstall was cancelled/,
-  );
+  assert.match(nsis, /!macro NSIS_HOOK_PREUNINSTALL\s+!macroend/);
+  assert.doesNotMatch(nsis, /Stop-BigBitesServer|Stop-Service|Remove-Database|DROP DATABASE/i);
 });
 
-test("desktop and waiter release defaults do not select a production API", () => {
+test("desktop and waiter release defaults use the hosted production API", () => {
   const desktopSource = read(
     path.resolve(desktopDirectory, "src", "App.tsx"),
   );
@@ -2003,13 +1834,12 @@ test("desktop and waiter release defaults do not select a production API", () =>
 
   assert.match(
     desktopSource,
-    /isTauri\(\)[\s\S]*?"http:\/\/127\.0\.0\.1:3000"[\s\S]*?import\.meta\.env\.VITE_API_URL/,
+    /import\.meta\.env\.DEV[\s\S]*?VITE_API_URL \|\| "http:\/\/127\.0\.0\.1:3000"[\s\S]*?"https:\/\/big-bites-server\.onrender\.com"/,
   );
-  assert.doesNotMatch(
-    desktopSource,
-    /https?:\/\/[^"'`\s]*(?:render\.com|neon\.tech)/i,
+  assert.match(
+    waiterSource,
+    /'API_BASE_URL'[\s\S]*?defaultValue: 'https:\/\/big-bites-server\.onrender\.com'/,
   );
-  assert.match(waiterSource, /'API_BASE_URL'[\s\S]*?defaultValue: ''/);
   assert.match(waiterSource, /_discoveryPort = 3001/);
   assert.match(waiterSource, /_serverPort = 3000/);
   assert.match(waiterSource, /_discoverServer\(\)/);

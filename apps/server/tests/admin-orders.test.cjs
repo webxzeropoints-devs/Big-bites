@@ -16,8 +16,10 @@ const adminToken = createToken({
 });
 const orders = new Map();
 const payments = new Map();
+const products = new Map();
 const tables = new Map();
 const servers = [];
+let stockMovements;
 let deletedOrderIds;
 let deletedPaymentOrderIds;
 let orderSequenceResetCount;
@@ -25,11 +27,14 @@ let orderSequenceResetCount;
 function resetState({ status = "CONFIRMED", paymentStatus = "PENDING" } = {}) {
   orders.clear();
   payments.clear();
+  products.clear();
   tables.clear();
+  stockMovements = [];
   deletedOrderIds = [];
   deletedPaymentOrderIds = [];
   orderSequenceResetCount = 0;
   tables.set(1, { id: 1, status: "OCCUPIED" });
+  products.set(41, { id: 41, stock: 7 });
   const payment = {
     id: 11,
     orderId: 1,
@@ -70,6 +75,27 @@ function installPrismaMocks() {
         deletedPaymentOrderIds.push(where.orderId);
         payments.delete(where.orderId);
         return { count: 1 };
+      },
+    },
+    product: {
+      findUnique: async ({ where }) => products.get(where.id) ?? null,
+      update: async ({ where, data }) => {
+        const product = products.get(where.id);
+        Object.assign(product, data);
+        return product;
+      },
+    },
+    productStockMovement: {
+      findMany: async ({ where }) =>
+        stockMovements.filter(
+          (movement) =>
+            movement.orderId === where.orderId &&
+            movement.movementType === where.movementType,
+        ),
+      create: async ({ data }) => {
+        const movement = { id: stockMovements.length + 1, ...data };
+        stockMovements.push(movement);
+        return movement;
       },
     },
     restaurantTable: {
@@ -143,6 +169,28 @@ test("deleting an unpaid order clears table state transactionally", async () => 
   assert.equal(orderSequenceResetCount, 1);
 });
 
+test("deleting an unpaid order restores tracked stock before removing it", async () => {
+  resetState();
+  stockMovements.push({
+    id: 1,
+    productId: 41,
+    orderId: 1,
+    movementType: "SALE",
+    quantity: 3,
+    previousStock: 10,
+    newStock: 7,
+  });
+  installPrismaMocks();
+  const baseUrl = await createAppServer();
+  const response = await deleteOrder(baseUrl);
+
+  assert.equal(response.status, 204);
+  assert.equal(products.get(41).stock, 10);
+  assert.equal(stockMovements[1].movementType, "CANCEL_RESTOCK");
+  assert.equal(stockMovements[1].quantity, 3);
+  assert.equal(stockMovements[1].newStock, 10);
+});
+
 test("paid, refunded, and completed orders are deleted with payments", async () => {
   for (const scenario of [
     { status: "COMPLETED", paymentStatus: "PAID" },
@@ -159,6 +207,8 @@ test("paid, refunded, and completed orders are deleted with payments", async () 
     assert.deepEqual(deletedOrderIds, [1]);
     assert.deepEqual(deletedPaymentOrderIds, [1]);
     assert.equal(orderSequenceResetCount, 1);
+    assert.equal(products.get(41).stock, 7);
+    assert.equal(stockMovements.length, 0);
   }
 });
 

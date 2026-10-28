@@ -100,7 +100,7 @@ trap {
 }
 
 $taskName = "BigBitesPosServer"
-$databaseName = "bigbites_client_local"
+$databaseName = "bigbites_client_local_delivery_20261027"
 Write-Host "Install directory: $InstallDir"
 Write-Host "Server resources: $ServerSourcePath"
 Write-Host "Installer log: $LogPath"
@@ -214,7 +214,7 @@ if ($hasExistingEnvironment) {
     $existingDatabaseUri.Scheme -ne "postgresql" -or
     $existingDatabaseUri.Host -ne "127.0.0.1" -or
     $existingDatabaseUri.Port -ne 5432 -or
-    $existingDatabaseRole -ne "bigbites_app" -or
+    $existingDatabaseRole -ne "bigbites_client_delivery_app" -or
     [string]::IsNullOrEmpty($existingDatabasePassword)
   ) {
     throw "The existing installation does not point to 127.0.0.1:5432/$databaseName. Setup stopped before changing the installation."
@@ -658,22 +658,8 @@ function Stage-ServerPayload {
       "package.json",
       "prisma.config.ts",
       "prisma\schema.prisma",
-      "prisma\migrations\migration_lock.toml",
-      "prisma\migrations\20260914084442_initial_hotel_pos\migration.sql",
-      "prisma\migrations\20260922200000_remove_kitchen_role\migration.sql",
-      "prisma\migrations\20260922210000_add_parcel_table\migration.sql",
-      "prisma\migrations\20260928233000_ready_for_billing\migration.sql",
-      "prisma\migrations\20260928234000_pending_order_payments\migration.sql",
-      "prisma\migrations\20260929210000_add_gst_settings\migration.sql",
-      "prisma\migrations\20260929220000_add_restaurant_address\migration.sql",
-      "prisma\migrations\20261003120000_add_fssai_gstin_settings\migration.sql",
-      "prisma\migrations\20261003123000_add_order_discounts\migration.sql",
-      "prisma\migrations\20261003130000_remove_manager_role\migration.sql",
-      "prisma\migrations\20261006150000_payment_tender_details\migration.sql",
-      "prisma\migrations\20261006220000_add_gst_toggle_and_order_reports\migration.sql",
-      "prisma\migrations\20261009230000_menu_variants_classification\migration.sql",
-      "prisma\migrations\20261013010000_cash_upi_split_payment\migration.sql",
-      "prisma\migrations\20261013213000_add_product_stock_movements\migration.sql",
+      "prisma\client-migrations\migration_lock.toml",
+      "prisma\client-migrations\20261027220000_initial_client_pos\migration.sql",
       "node_modules\@prisma\client\package.json",
       "node_modules\.prisma\client\index.js",
       "node_modules\prisma\build\index.js",
@@ -927,7 +913,7 @@ function Save-LegacyServerPayload {
   return $payloadId
 }
 
-function Get-VerifiedInventoryRemovalMigrationBytes {
+function Get-VerifiedClientBaselineMigrationBytes {
   param(
     [Parameter(Mandatory = $true)]
     [string]$Path,
@@ -937,7 +923,7 @@ function Get-VerifiedInventoryRemovalMigrationBytes {
   )
 
   if ($ExpectedChecksum -notmatch '^[a-f0-9]{64}$') {
-    throw "The expected stock-removal migration checksum is invalid."
+    throw "The expected local-client baseline migration checksum is invalid."
   }
 
   $migrationBytes = [System.IO.File]::ReadAllBytes($Path)
@@ -946,12 +932,12 @@ function Get-VerifiedInventoryRemovalMigrationBytes {
     $migrationSql = $strictUtf8.GetString($migrationBytes)
   }
   catch {
-    throw "The stock-removal migration is not valid UTF-8."
+    throw "The local-client baseline migration is not valid UTF-8."
   }
 
   $normalizedSql = $migrationSql.Replace("`r`n", "`n")
   if ($normalizedSql.Contains("`r")) {
-    throw "The stock-removal migration contains unsupported line endings."
+    throw "The local-client baseline migration contains unsupported line endings."
   }
   $normalizedBytes = [System.Text.Encoding]::UTF8.GetBytes($normalizedSql)
   $sha256 = [System.Security.Cryptography.SHA256]::Create()
@@ -965,7 +951,7 @@ function Get-VerifiedInventoryRemovalMigrationBytes {
   }
 
   if ($normalizedChecksum -cne $ExpectedChecksum) {
-    throw "The stock-removal migration does not match the verified historical SQL checksum."
+    throw "The local-client baseline migration does not match its packaged checksum."
   }
 
   return ,$normalizedBytes
@@ -995,10 +981,10 @@ function Assert-FreshDatabaseMigrationGate {
   )
 
   if (
-    $MigrationName -cne "20261020101500_remove_product_stock" -or
-    $MigrationChecksum -cne "98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751"
+    $MigrationName -cne "20261027220000_initial_client_pos" -or
+    $MigrationChecksum -notmatch '^[a-f0-9]{64}$'
   ) {
-    throw "The fresh-database migration does not match the verified stock-removal migration identity and checksum."
+    throw "The fresh-database migration does not match the packaged local-client baseline identity and checksum."
   }
 
   if (-not $DatabaseCreatedByAttempt) {
@@ -1088,7 +1074,7 @@ function ConvertTo-FreshDatabaseMigrationNames {
           $InventoryRemovalSafeMigrationChecksum
         )
       ) {
-        throw "The installation-created database has an unrecognized stock-removal migration checksum."
+        throw "The installation-created database has an unrecognized local-client baseline checksum."
       }
       $migrationName = $InventoryRemovalMigrationName
     }
@@ -1581,7 +1567,7 @@ function New-LocalDatabaseUrl([string]$Password, [string]$DatabaseName) {
     throw "The local database connection settings are invalid."
   }
 
-  $encodedUser = [Uri]::EscapeDataString("bigbites_app")
+  $encodedUser = [Uri]::EscapeDataString("bigbites_client_delivery_app")
   $encodedPassword = [Uri]::EscapeDataString($Password)
   $url = "postgresql://${encodedUser}:${encodedPassword}@127.0.0.1:5432/${DatabaseName}?schema=public"
   try {
@@ -1604,7 +1590,7 @@ function New-LocalDatabaseUrl([string]$Password, [string]$DatabaseName) {
     $uri.Scheme -ne "postgresql" -or
     $uri.Host -ne "127.0.0.1" -or
     $uri.Port -ne 5432 -or
-    $parsedRole -ne "bigbites_app" -or
+    $parsedRole -ne "bigbites_client_delivery_app" -or
     $parsedPassword -cne $Password -or
     $parsedDatabase -cne $DatabaseName -or
     $uri.Query -cne "?schema=public"
@@ -2052,22 +2038,8 @@ if (-not $hasBundledServer) {
 else {
   $requiredServerResources = @(
     "prisma\schema.prisma",
-    "prisma\migrations\migration_lock.toml",
-    "prisma\migrations\20260914084442_initial_hotel_pos\migration.sql",
-    "prisma\migrations\20260922200000_remove_kitchen_role\migration.sql",
-    "prisma\migrations\20260922210000_add_parcel_table\migration.sql",
-    "prisma\migrations\20260928233000_ready_for_billing\migration.sql",
-    "prisma\migrations\20260928234000_pending_order_payments\migration.sql",
-    "prisma\migrations\20260929210000_add_gst_settings\migration.sql",
-    "prisma\migrations\20260929220000_add_restaurant_address\migration.sql",
-    "prisma\migrations\20261003120000_add_fssai_gstin_settings\migration.sql",
-    "prisma\migrations\20261003123000_add_order_discounts\migration.sql",
-    "prisma\migrations\20261003130000_remove_manager_role\migration.sql",
-    "prisma\migrations\20261006150000_payment_tender_details\migration.sql",
-    "prisma\migrations\20261006220000_add_gst_toggle_and_order_reports\migration.sql",
-    "prisma\migrations\20261009230000_menu_variants_classification\migration.sql",
-    "prisma\migrations\20261013010000_cash_upi_split_payment\migration.sql",
-    "prisma\migrations\20261013213000_add_product_stock_movements\migration.sql"
+    "prisma\client-migrations\migration_lock.toml",
+    "prisma\client-migrations\20261027220000_initial_client_pos\migration.sql"
   )
   foreach ($resource in $requiredServerResources) {
     if (-not (Test-Path -LiteralPath (Join-Path $ServerSourcePath $resource))) {
@@ -2076,53 +2048,30 @@ else {
   }
 
   $migrationDirectories = Get-ChildItem `
-    -LiteralPath (Join-Path $ServerSourcePath "prisma\migrations") `
+    -LiteralPath (Join-Path $ServerSourcePath "prisma\client-migrations") `
     -Directory
-  $inventoryRemovalMigrationName = "20261020101500_remove_product_stock"
-  $inventoryRemovalSourceMigrationName = "20261020100000_remove_product_stock"
-  $inventoryRemovalMigrationChecksum = "98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751"
-  $inventoryRemovalSafeMigrationSql = "-- Historical stock-removal migration intentionally disabled for local BIG BITES installs.`r`n"
-  $inventoryRemovalSafeMigrationBytes = [System.Text.Encoding]::UTF8.GetBytes(
-    $inventoryRemovalSafeMigrationSql
-  )
-  $inventoryRemovalSafeMigrationSha256 = [System.Security.Cryptography.SHA256]::Create()
-  try {
-    $inventoryRemovalSafeMigrationChecksum = (
-      [BitConverter]::ToString(
-        $inventoryRemovalSafeMigrationSha256.ComputeHash(
-          $inventoryRemovalSafeMigrationBytes
-        )
-      ).Replace("-", "").ToLowerInvariant()
-    )
+  $clientBaselineMigrationName = "20261027220000_initial_client_pos"
+  $inventoryRemovalMigrationName = $clientBaselineMigrationName
+  $inventoryRemovalSourceMigrationName = $clientBaselineMigrationName
+  $inventoryRemovalSourceDirectory = $migrationDirectories |
+    Where-Object { $_.Name -eq $clientBaselineMigrationName } |
+    Select-Object -First 1
+  if (-not $inventoryRemovalSourceDirectory) {
+    throw "The packaged local-client baseline migration is missing. Installation stopped before changing services or databases."
   }
-  finally {
-    $inventoryRemovalSafeMigrationSha256.Dispose()
-  }
-  $inventoryRemovalSourceDirectories = @(
-    $migrationDirectories |
-      Where-Object {
-        $_.Name -in @(
-          $inventoryRemovalMigrationName,
-          $inventoryRemovalSourceMigrationName
-        )
-      }
-  )
-  if ($inventoryRemovalSourceDirectories.Count -ne 1) {
-    throw "The packaged stock-removal migration identity is missing or ambiguous. Installation stopped before changing services or databases."
-  }
-  $inventoryRemovalSourceDirectory = $inventoryRemovalSourceDirectories[0]
   $inventoryRemovalSourcePath = Join-Path `
     $inventoryRemovalSourceDirectory.FullName `
     "migration.sql"
   if (
     -not (Test-Path -LiteralPath $inventoryRemovalSourcePath -PathType Leaf)
   ) {
-    throw "The packaged stock-removal migration does not match the verified historical migration. Installation stopped before changing services or databases."
+    throw "The packaged local-client baseline migration is missing. Installation stopped before changing services or databases."
   }
-  $null = Get-VerifiedInventoryRemovalMigrationBytes `
-    -Path $inventoryRemovalSourcePath `
-    -ExpectedChecksum $inventoryRemovalMigrationChecksum
-  $destructiveInventorySql = '(?is)\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:(?:"?[\w]+"?)\.)?(?:"ProductStockMovement"|ProductStockMovement)(?![\w])|\bALTER\s+TABLE\b[^;]*?\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?(?:"(?:stock|stockUnit|lowStockThreshold|lastStockUpdatedAt)"|\b(?:stock|stockUnit|lowStockThreshold|lastStockUpdatedAt)\b)'
+  $inventoryRemovalMigrationChecksum = (
+    Get-FileHash -LiteralPath $inventoryRemovalSourcePath -Algorithm SHA256
+  ).Hash.ToLowerInvariant()
+  $inventoryRemovalSafeMigrationChecksum = $inventoryRemovalMigrationChecksum
+  $destructiveInventorySql = '(?is)\bDROP\s+TABLE\b|\bDROP\s+COLUMN\b'
   foreach ($migrationDirectory in $migrationDirectories) {
     $migrationFile = Join-Path $migrationDirectory.FullName "migration.sql"
     if (-not (Test-Path -LiteralPath $migrationFile)) {
@@ -2130,23 +2079,21 @@ else {
     }
     $migrationSql = [System.IO.File]::ReadAllText($migrationFile)
     if (
-      $migrationSql -match $destructiveInventorySql -and
-      $migrationDirectory.FullName -ne $inventoryRemovalSourceDirectory.FullName
+      $migrationSql -match $destructiveInventorySql
     ) {
-      throw "Migration $($migrationDirectory.Name) contains SQL that removes product stock or stock-movement history. Installation stopped before changing services or databases."
+      throw "The fresh local-client baseline unexpectedly contains destructive SQL. Installation stopped before changing services or databases."
     }
   }
 
   $approvedMigrationDirectories = @(
     $requiredServerResources |
       Where-Object {
-        $_ -match '^prisma\\migrations\\[^\\]+\\migration\.sql$'
+        $_ -match '^prisma\\client-migrations\\[^\\]+\\migration\.sql$'
       } |
       ForEach-Object {
         ($_ -split '\\')[2]
       }
   )
-  $approvedMigrationDirectories += $inventoryRemovalSourceDirectory.Name
   $unreviewedMigrations = @(
     $migrationDirectories |
       Where-Object {
@@ -2167,18 +2114,11 @@ else {
   if (-not $productModel.Success) {
     throw "The packaged Prisma schema does not define the Product model. Installation stopped before changing services or databases."
   }
-  foreach ($inventoryField in @(
-    "stock",
-    "stockUnit",
-    "lowStockThreshold",
-    "lastStockUpdatedAt"
-  )) {
-    if ($productModel.Groups[1].Value -notmatch "(?m)^\s*$inventoryField\s+") {
-      throw "The packaged Product schema is missing required inventory field $inventoryField. Installation stopped before changing services or databases."
-    }
-  }
-  if ($schema -notmatch '(?ms)model\s+ProductStockMovement\s*\{') {
-    throw "The packaged Prisma schema does not preserve stock-movement history. Installation stopped before changing services or databases."
+  if (
+    $productModel.Groups[1].Value -match '(?m)^\s*(stock|stockUnit|lowStockThreshold|lastStockUpdatedAt)\s+' -or
+    $schema -match '(?ms)model\s+ProductStockMovement\s*\{'
+  ) {
+    throw "The packaged Prisma schema unexpectedly contains stock or inventory models. Installation stopped before changing services or databases."
   }
 }
 
@@ -2294,7 +2234,7 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc "SELECT current_database() || '|' || host(inet_server_addr()) || '|' || current_setting('port')" `
@@ -2323,7 +2263,7 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc "SELECT COALESCE(shobj_description((SELECT oid FROM pg_database WHERE datname = current_database()), 'pg_database'), '') || '|' || COALESCE(shobj_description((SELECT oid FROM pg_roles WHERE rolname = current_user), 'pg_authid'), '')" `
@@ -2341,7 +2281,7 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc 'SELECT count(*) FROM public."_prisma_migrations" WHERE finished_at IS NULL AND rolled_back_at IS NULL' `
@@ -2356,7 +2296,7 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc 'SELECT migration_name || ''|'' || checksum FROM public."_prisma_migrations" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name' `
@@ -2384,21 +2324,13 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
         throw "The existing migration ledger contains an invalid or ambiguous entry. The existing server was not stopped."
       }
       $migrationPath = Join-Path `
-        (Join-Path $ServerSourcePath "prisma\migrations") `
+        (Join-Path $ServerSourcePath "prisma\client-migrations") `
         (Join-Path $entry[0] "migration.sql")
-      if (
-        $entry[0] -eq $inventoryRemovalMigrationName -and
-        -not (Test-Path -LiteralPath $migrationPath -PathType Leaf)
-      ) {
-        $migrationPath = Join-Path `
-          (Join-Path $ServerSourcePath "prisma\migrations") `
-          (Join-Path $inventoryRemovalSourceMigrationName "migration.sql")
-      }
       if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
         throw "The existing database contains a migration absent from this package. Its schema history cannot be verified; the existing server was not stopped."
       }
       $packageChecksum = if ($entry[0] -eq $inventoryRemovalMigrationName) {
-        $null = Get-VerifiedInventoryRemovalMigrationBytes `
+        $null = Get-VerifiedClientBaselineMigrationBytes `
           -Path $migrationPath `
           -ExpectedChecksum $inventoryRemovalMigrationChecksum
         if (
@@ -2407,7 +2339,7 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
             $inventoryRemovalSafeMigrationChecksum
           )
         ) {
-          throw "The existing database has an unrecognized stock-removal migration checksum. The existing server was not stopped."
+          throw "The existing database has an unrecognized local-client baseline checksum. The existing server was not stopped."
         }
         $entry[1]
       }
@@ -2422,16 +2354,9 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
 
     $packagedMigrations = @(
       Get-ChildItem `
-        -LiteralPath (Join-Path $ServerSourcePath "prisma\migrations") `
+        -LiteralPath (Join-Path $ServerSourcePath "prisma\client-migrations") `
         -Directory |
-        ForEach-Object {
-          if ($_.Name -eq $inventoryRemovalSourceMigrationName) {
-            $inventoryRemovalMigrationName
-          }
-          else {
-            $_.Name
-          }
-        }
+        Select-Object -ExpandProperty Name
     )
     $pendingMigrations = @(
       $packagedMigrations |
@@ -2440,31 +2365,23 @@ if ($hasExistingEnvironment -and -not $isResumingInstall) {
     if ($pendingMigrations.Count -gt 0) {
       throw "The existing database has unapplied migrations. Setup stopped before stopping the server or applying migrations; have the database owner review the migration plan."
     }
-    $unrecognizedRemovalMigrations = @(
-      $preflightAppliedMigrations |
-        Where-Object { $_ -match '^\d{14}_remove_product_stock$' -and $_ -ne $inventoryRemovalMigrationName }
-    )
-    if ($unrecognizedRemovalMigrations.Count -gt 0) {
-      throw "The existing database records a stock-removal migration under an unrecognized migration identity. Its history cannot be verified; the existing server was not stopped."
-    }
-
-    $preflightInventorySchemaState = (
+    $preflightClientSchemaState = (
       & $psqlPath `
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
-        -tAc "SELECT CASE WHEN to_regclass('public.""Product""') IS NULL THEN 'missing' ELSE 'present' END || '|' || (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'Product' AND column_name IN ('stock', 'stockUnit', 'lowStockThreshold', 'lastStockUpdatedAt')) || '|' || CASE WHEN to_regclass('public.""ProductStockMovement""') IS NULL THEN 'absent' ELSE 'present' END" `
+        -tAc "SELECT CASE WHEN to_regclass('public.""Product""') IS NULL THEN 'missing' ELSE 'present' END || '|' || (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'Product' AND column_name IN ('stock', 'stockUnit', 'lowStockThreshold', 'lastStockUpdatedAt')) OR table_name = 'ProductStockMovement'))" `
         2>&1
     ) | Out-String
 
     if (
       $LASTEXITCODE -ne 0 -or
-      $preflightInventorySchemaState.Trim() -ne "present|4|present"
+      $preflightClientSchemaState.Trim() -ne "present|0"
     ) {
-    throw "The existing local database does not have the verified inventory-preserving schema. The existing server was not stopped and no migration was applied."
+    throw "The existing local database is not the expected stock-free client schema. The existing server was not stopped and no migration was applied."
     }
   }
   finally {
@@ -2511,7 +2428,7 @@ if (-not ($hasExistingEnvironment -and -not $isResumingInstall)) {
         -p 5432 `
         -U postgres `
         -d postgres `
-        -tAc "SELECT '1|' || COALESCE(shobj_description(oid, 'pg_authid'), '') FROM pg_roles WHERE rolname = 'bigbites_app'" `
+        -tAc "SELECT '1|' || COALESCE(shobj_description(oid, 'pg_authid'), '') FROM pg_roles WHERE rolname = 'bigbites_client_delivery_app'" `
         2>&1
     ) | Out-String
     if ($LASTEXITCODE -ne 0) {
@@ -2801,7 +2718,7 @@ Write-Host "Staging and validating the replacement BIG BITES POS server..."
 $stagedServerPath = Stage-ServerPayload `
   -SourcePath $ServerSourcePath `
   -ServerRoot $serverDir
-$stagedMigrationsPath = Join-Path $stagedServerPath "prisma\migrations"
+$stagedMigrationsPath = Join-Path $stagedServerPath "prisma\client-migrations"
 $stagedInventoryRemovalSourcePath = Join-Path `
   $stagedMigrationsPath `
   $inventoryRemovalSourceMigrationName
@@ -2809,32 +2726,16 @@ $stagedInventoryRemovalPath = Join-Path `
   $stagedMigrationsPath `
   $inventoryRemovalMigrationName
 if (
-  (Test-Path -LiteralPath $stagedInventoryRemovalSourcePath -PathType Container) -and
-  (Test-Path -LiteralPath $stagedInventoryRemovalPath)
-) {
-  throw "The staged Prisma migrations contain conflicting stock-removal identities."
-}
-if (Test-Path -LiteralPath $stagedInventoryRemovalSourcePath -PathType Container) {
-  Move-Item `
-    -LiteralPath $stagedInventoryRemovalSourcePath `
-    -Destination $stagedInventoryRemovalPath `
-    -ErrorAction Stop
-}
-if (
   -not (Test-Path -LiteralPath $stagedInventoryRemovalPath -PathType Container)
 ) {
-  throw "The staged stock-removal migration does not match the verified historical migration."
+  throw "The staged local-client baseline migration is missing."
 }
 $stagedInventoryRemovalSqlPath = Join-Path `
   $stagedInventoryRemovalPath `
   "migration.sql"
-$null = Get-VerifiedInventoryRemovalMigrationBytes `
+$null = Get-VerifiedClientBaselineMigrationBytes `
   -Path $stagedInventoryRemovalSqlPath `
   -ExpectedChecksum $inventoryRemovalMigrationChecksum
-[System.IO.File]::WriteAllBytes(
-  $stagedInventoryRemovalSqlPath,
-  $inventoryRemovalSafeMigrationBytes
-)
 
 $payloadsRoot = Join-Path $serverDir "payloads"
 New-Item -ItemType Directory -Force -Path $payloadsRoot | Out-Null
@@ -2995,7 +2896,7 @@ else {
         -p 5432 `
         -U postgres `
         -d postgres `
-        -tAc "SELECT '1|' || COALESCE(shobj_description(oid, 'pg_authid'), '') FROM pg_roles WHERE rolname = 'bigbites_app'" `
+        -tAc "SELECT '1|' || COALESCE(shobj_description(oid, 'pg_authid'), '') FROM pg_roles WHERE rolname = 'bigbites_client_delivery_app'" `
         2>&1
     ) | Out-String
 
@@ -3012,7 +2913,7 @@ else {
       throw "The local $databaseName database exists but cannot be positively tied to this installation attempt. It and all business data were left unchanged. Do not delete or reset it; restore the matching installation state or contact support."
     }
     if ($roleExists -and -not $roleOwned) {
-      throw "The local bigbites_app role exists but cannot be positively tied to this installation attempt. It was left unchanged. Do not delete it; restore the matching installation state or contact support."
+      throw "The local bigbites_client_delivery_app role exists but cannot be positively tied to this installation attempt. It was left unchanged. Do not delete it; restore the matching installation state or contact support."
     }
 
     if ($databaseOwned) {
@@ -3034,8 +2935,8 @@ else {
     if (-not $roleExists) {
       $installState.roleCreationStarted = $true
       Save-InstallState -State $installState -StatePath $installStatePath
-      Invoke-Psql "CREATE ROLE bigbites_app LOGIN PASSWORD '$appPassword'"
-      Invoke-Psql "COMMENT ON ROLE bigbites_app IS '$attemptMarker'"
+      Invoke-Psql "CREATE ROLE bigbites_client_delivery_app LOGIN PASSWORD '$appPassword'"
+      Invoke-Psql "COMMENT ON ROLE bigbites_client_delivery_app IS '$attemptMarker'"
       $installState.roleCreatedByAttempt = $true
       Save-InstallState -State $installState -StatePath $installStatePath
     }
@@ -3043,7 +2944,7 @@ else {
     if (-not $databaseExists) {
       $installState.databaseCreationStarted = $true
       Save-InstallState -State $installState -StatePath $installStatePath
-      Invoke-Psql "CREATE DATABASE $databaseName OWNER bigbites_app"
+      Invoke-Psql "CREATE DATABASE $databaseName OWNER bigbites_client_delivery_app"
       Invoke-Psql "COMMENT ON DATABASE $databaseName IS '$attemptMarker'"
       $installState.databaseCreatedByAttempt = $true
       Save-InstallState -State $installState -StatePath $installStatePath
@@ -3070,7 +2971,7 @@ if (-not $isNewDatabase) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc "SELECT current_database() || '|' || host(inet_server_addr()) || '|' || current_setting('port')" `
@@ -3086,7 +2987,7 @@ if (-not $isNewDatabase) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc 'SELECT count(*) FROM public."_prisma_migrations" WHERE finished_at IS NULL AND rolled_back_at IS NULL' `
@@ -3102,7 +3003,7 @@ if (-not $isNewDatabase) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc 'SELECT migration_name || ''|'' || checksum FROM public."_prisma_migrations" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name' `
@@ -3133,7 +3034,7 @@ if (-not $isNewDatabase) {
     }
     $migrationDirectories = @(
       Get-ChildItem `
-        -LiteralPath (Join-Path $script:candidatePayloadPath "prisma\migrations") `
+        -LiteralPath (Join-Path $script:candidatePayloadPath "prisma\client-migrations") `
         -Directory |
         Select-Object -ExpandProperty Name
     )
@@ -3146,13 +3047,13 @@ if (-not $isNewDatabase) {
     }
     foreach ($migrationName in $appliedMigrations) {
       $migrationPath = Join-Path `
-        (Join-Path $script:candidatePayloadPath "prisma\migrations") `
+        (Join-Path $script:candidatePayloadPath "prisma\client-migrations") `
         (Join-Path $migrationName "migration.sql")
       if (-not (Test-Path -LiteralPath $migrationPath -PathType Leaf)) {
         throw "The database migration history contains an entry without packaged SQL. Setup stopped without applying migrations."
       }
       $packageChecksum = if ($migrationName -eq $inventoryRemovalMigrationName) {
-        $null = Get-VerifiedInventoryRemovalMigrationBytes `
+        $null = Get-VerifiedClientBaselineMigrationBytes `
           -Path $migrationPath `
           -ExpectedChecksum $inventoryRemovalMigrationChecksum
         $inventoryRemovalMigrationChecksum
@@ -3167,7 +3068,7 @@ if (-not $isNewDatabase) {
         $migrationName -eq $inventoryRemovalMigrationName -and
         $packageChecksum -ine $inventoryRemovalMigrationChecksum
       ) {
-        throw "The historical stock-removal migration checksum is not recognized. Migrations were not applied."
+        throw "The packaged local-client baseline checksum is not recognized. Migrations were not applied."
       }
     }
 
@@ -3176,24 +3077,20 @@ if (-not $isNewDatabase) {
         Where-Object { $_ -notin $appliedMigrations }
     )
 
-    if ($inventoryRemovalMigrationName -in $pendingMigrations) {
-      throw "The packaged migration set contains a stock-removal migration that cannot be applied to an existing database."
-    }
-
-    $inventorySchemaState = (
+    $clientSchemaState = (
       & $psqlPath `
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
-        -tAc "SELECT CASE WHEN to_regclass('public.""Product""') IS NULL THEN 'missing' ELSE 'present' END || '|' || (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'Product' AND column_name IN ('stock', 'stockUnit', 'lowStockThreshold', 'lastStockUpdatedAt')) || '|' || CASE WHEN to_regclass('public.""ProductStockMovement""') IS NULL THEN 'absent' ELSE 'present' END" `
+        -tAc "SELECT CASE WHEN to_regclass('public.""Product""') IS NULL THEN 'missing' ELSE 'present' END || '|' || (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'Product' AND column_name IN ('stock', 'stockUnit', 'lowStockThreshold', 'lastStockUpdatedAt')) OR table_name = 'ProductStockMovement'))" `
         2>&1
     ) | Out-String
 
-    if ($LASTEXITCODE -ne 0 -or $inventorySchemaState.Trim() -ne "present|4|present") {
-      throw "The existing local database does not have the verified inventory-preserving schema. Setup stopped without applying migrations."
+    if ($LASTEXITCODE -ne 0 -or $clientSchemaState.Trim() -ne "present|0") {
+      throw "The existing local database is not the expected stock-free client schema. Setup stopped without applying migrations."
     }
 
     if ($pendingMigrations.Count -gt 0) {
@@ -3213,7 +3110,7 @@ if ($isNewDatabase) {
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
         -tAc "SELECT current_database() || '|' || host(inet_server_addr()) || '|' || current_setting('port') || '|' || (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname <> '_prisma_migrations' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')) || '|' || CASE WHEN to_regclass('public.""_prisma_migrations""') IS NULL THEN 'absent' ELSE 'present' END" `
@@ -3231,7 +3128,7 @@ if ($isNewDatabase) {
           -w `
           -h 127.0.0.1 `
           -p 5432 `
-          -U bigbites_app `
+          -U bigbites_client_delivery_app `
           -d $databaseName `
           -v ON_ERROR_STOP=1 `
           -tAc 'SELECT count(*) FROM public."_prisma_migrations" WHERE finished_at IS NULL OR rolled_back_at IS NOT NULL' `
@@ -3248,7 +3145,7 @@ if ($isNewDatabase) {
           -w `
           -h 127.0.0.1 `
           -p 5432 `
-          -U bigbites_app `
+          -U bigbites_client_delivery_app `
           -d $databaseName `
           -v ON_ERROR_STOP=1 `
           -tAc 'SELECT migration_name || ''|'' || checksum FROM public."_prisma_migrations" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL ORDER BY migration_name' `
@@ -3264,7 +3161,7 @@ if ($isNewDatabase) {
       )
     }
 
-    $migrationRoot = Join-Path $script:candidatePayloadPath "prisma\migrations"
+    $migrationRoot = Join-Path $script:candidatePayloadPath "prisma\client-migrations"
     $migrationDirectories = @(
       Get-ChildItem -LiteralPath $migrationRoot -Directory |
         Select-Object -ExpandProperty Name
@@ -3289,7 +3186,7 @@ if ($isNewDatabase) {
         throw "The installation-created database has a migration without packaged SQL. No migration was applied."
       }
       $packageChecksum = if ($entry[0] -eq $inventoryRemovalMigrationName) {
-        $null = Get-VerifiedInventoryRemovalMigrationBytes `
+        $null = Get-VerifiedClientBaselineMigrationBytes `
           -Path $inventoryRemovalSourcePath `
           -ExpectedChecksum $inventoryRemovalMigrationChecksum
         if (
@@ -3298,7 +3195,7 @@ if ($isNewDatabase) {
             $inventoryRemovalSafeMigrationChecksum
           )
         ) {
-          throw "The installation-created database has an unrecognized stock-removal migration checksum. No migration was applied."
+          throw "The installation-created database has an unrecognized local-client baseline checksum. No migration was applied."
         }
         $entry[1]
       }
@@ -3329,6 +3226,7 @@ $env:DATABASE_URL = $databaseUrl
 $env:AUTH_SECRET = $authSecret
 $env:NODE_ENV = "production"
 $env:BIGBITES_DEPLOYMENT_MODE = "local"
+$env:BIGBITES_LOCAL_CLIENT_MIGRATIONS = "1"
 $migrationDatabaseUri = [Uri]$env:DATABASE_URL
 Write-Host (
   "Verified local migration target: {0}:{1}/{2} (schema {3})." -f
@@ -3354,7 +3252,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
       throw "Database migrations failed. Review the migration error and restore the verified local backup if recovery is required."
     }
-    Write-Host "Database migrations completed in package order; the stock-removal migration ran only as its verified comment-only replacement."
+    Write-Host "The stock-free local-client baseline migration was applied and verified."
   }
   else {
     Write-Host "The existing local database is already current with the packaged migrations."
@@ -3368,145 +3266,32 @@ finally {
     Env:DATABASE_URL,
     Env:AUTH_SECRET,
     Env:NODE_ENV,
-    Env:BIGBITES_DEPLOYMENT_MODE `
+    Env:BIGBITES_DEPLOYMENT_MODE,
+    Env:BIGBITES_LOCAL_CLIENT_MIGRATIONS `
     -ErrorAction SilentlyContinue
 }
 
 if ($isNewDatabase) {
   $env:PGPASSWORD = $appPassword
   try {
-    $finalInventorySchemaState = (
+    $finalClientSchemaState = (
       & $psqlPath `
         -w `
         -h 127.0.0.1 `
         -p 5432 `
-        -U bigbites_app `
+        -U bigbites_client_delivery_app `
         -d $databaseName `
         -v ON_ERROR_STOP=1 `
-        -tAc "SELECT CASE WHEN to_regclass('public.""Product""') IS NULL THEN 'missing' ELSE 'present' END || '|' || (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'Product' AND column_name IN ('stock', 'stockUnit', 'lowStockThreshold', 'lastStockUpdatedAt')) || '|' || CASE WHEN to_regclass('public.""ProductStockMovement""') IS NULL THEN 'absent' ELSE 'present' END" `
+        -tAc "SELECT CASE WHEN to_regclass('public.""Product""') IS NULL OR to_regclass('public.""Category""') IS NULL OR to_regclass('public.""Order""') IS NULL OR to_regclass('public.""Payment""') IS NULL THEN 'missing' ELSE 'present' END || '|' || (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'Product' AND column_name IN ('stock', 'stockUnit', 'lowStockThreshold', 'lastStockUpdatedAt')) OR table_name = 'ProductStockMovement'))" `
         2>&1
     ) | Out-String
     if (
       $LASTEXITCODE -ne 0 -or
-      $finalInventorySchemaState.Trim() -ne "present|4|present"
+      $finalClientSchemaState.Trim() -ne "present|0"
     ) {
-      if (
-        -not $installState -or
-        -not [bool]$installState.databaseCreatedByAttempt
-      ) {
-        throw (
-          "Inventory schema validation failed for the installation-created database (observed state: {0}). " +
-          "Automatic repair was blocked because database ownership could not be verified."
-        ) -f $finalInventorySchemaState.Trim()
-      }
-
-      $stockColumnState = (
-        & $psqlPath `
-          -w `
-          -h 127.0.0.1 `
-          -p 5432 `
-          -U bigbites_app `
-          -d $databaseName `
-          -v ON_ERROR_STOP=1 `
-          -tAc "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'Product') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'Product' AND column_name = 'stock') THEN 'safe' ELSE 'unsafe' END" `
-          2>&1
-      ) | Out-String
-      if ($LASTEXITCODE -ne 0 -or $stockColumnState.Trim() -ne "safe") {
-        throw (
-          "Inventory schema validation failed (observed state: {0}); the Product.stock column was not confirmed. " +
-          "No automatic database repair was attempted."
-        ) -f $finalInventorySchemaState.Trim()
-      }
-
-      Write-Host "Repairing only missing inventory schema on the verified installation-created database; existing Product.stock quantities are preserved."
-      $inventoryRepairSql = @'
-BEGIN;
-
-DO $$
-BEGIN
-  IF to_regclass('public."Product"') IS NULL THEN
-    RAISE EXCEPTION 'Required table public."Product" is missing; inventory repair was not applied';
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'Product'
-      AND column_name = 'stock'
-  ) THEN
-    RAISE EXCEPTION 'Required column public."Product".stock is missing; inventory repair was not applied';
-  END IF;
-END $$;
-
-ALTER TABLE public."Product"
-  ADD COLUMN IF NOT EXISTS "stockUnit" TEXT NOT NULL DEFAULT 'pcs',
-  ADD COLUMN IF NOT EXISTS "lowStockThreshold" INTEGER NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS "lastStockUpdatedAt" TIMESTAMP(3);
-
-CREATE TABLE IF NOT EXISTS public."ProductStockMovement" (
-  "id" SERIAL NOT NULL,
-  "productId" INTEGER NOT NULL,
-  "movementType" TEXT NOT NULL DEFAULT 'ADJUSTMENT',
-  "quantity" INTEGER NOT NULL,
-  "previousStock" INTEGER NOT NULL,
-  "newStock" INTEGER NOT NULL,
-  "reason" TEXT NOT NULL DEFAULT '',
-  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT "ProductStockMovement_pkey" PRIMARY KEY ("id")
-);
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = to_regclass('public."ProductStockMovement"')
-      AND conname = 'ProductStockMovement_productId_fkey'
-  ) THEN
-    ALTER TABLE public."ProductStockMovement"
-      ADD CONSTRAINT "ProductStockMovement_productId_fkey"
-      FOREIGN KEY ("productId") REFERENCES public."Product"("id")
-      ON DELETE RESTRICT ON UPDATE CASCADE;
-  END IF;
-END $$;
-
-COMMIT;
-'@
-      & $psqlPath `
-        -w `
-        -h 127.0.0.1 `
-        -p 5432 `
-        -U bigbites_app `
-        -d $databaseName `
-        -v ON_ERROR_STOP=1 `
-        -c $inventoryRepairSql `
-        2>&1 | ForEach-Object { Write-Host $_ }
-      if ($LASTEXITCODE -ne 0) {
-        throw "The safe additive inventory-schema repair failed. Existing stock quantities were not intentionally changed; preserve the database and setup log."
-      }
-
-      $finalInventorySchemaState = (
-        & $psqlPath `
-          -w `
-          -h 127.0.0.1 `
-          -p 5432 `
-          -U bigbites_app `
-          -d $databaseName `
-          -v ON_ERROR_STOP=1 `
-          -tAc "SELECT CASE WHEN to_regclass('public.""Product""') IS NULL THEN 'missing' ELSE 'present' END || '|' || (SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'Product' AND column_name IN ('stock', 'stockUnit', 'lowStockThreshold', 'lastStockUpdatedAt')) || '|' || CASE WHEN to_regclass('public.""ProductStockMovement""') IS NULL THEN 'absent' ELSE 'present' END" `
-          2>&1
-      ) | Out-String
-      if (
-        $LASTEXITCODE -ne 0 -or
-        $finalInventorySchemaState.Trim() -ne "present|4|present"
-      ) {
-        throw (
-          "Inventory schema validation still failed after the safe repair (observed state: {0}). " +
-          "The local server was not started; preserve the database and setup log."
-        ) -f $finalInventorySchemaState.Trim()
-      }
-      Write-Host "Inventory schema is ready; no stock quantities were reset and no movement records were fabricated."
+      throw "The fresh local database failed stock-free schema validation (observed state: $($finalClientSchemaState.Trim())). No automatic schema repair was attempted."
     }
+    Write-Host "The fresh local database schema was verified as stock-free."
   }
   finally {
     Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue

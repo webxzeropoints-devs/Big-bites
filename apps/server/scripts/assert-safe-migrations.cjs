@@ -1,7 +1,19 @@
+const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { existsSync, readFileSync, readdirSync, statSync } = require("node:fs");
 
 const INVENTORY_REMOVAL_MIGRATION = "20261020101500_remove_product_stock";
+const INVENTORY_REMOVAL_ALIAS = "20261020100000_remove_product_stock";
+const STOCK_MOVEMENT_MIGRATION = "20261013213000_add_product_stock_movements";
+const INVENTORY_REMOVAL_SQL = `DROP TABLE IF EXISTS "ProductStockMovement";
+
+ALTER TABLE "Product"
+  DROP COLUMN IF EXISTS "stock",
+  DROP COLUMN IF EXISTS "stockUnit",
+  DROP COLUMN IF EXISTS "lowStockThreshold",
+  DROP COLUMN IF EXISTS "lastStockUpdatedAt";
+`;
+const normalizeSql = (sql) => sql.replace(/\s+/g, " ").trim();
 const REQUIRED_CANONICAL_MIGRATIONS = [
   "20260914084442_initial_hotel_pos",
   "20260922200000_remove_kitchen_role",
@@ -18,21 +30,20 @@ const REQUIRED_CANONICAL_MIGRATIONS = [
   "20261009230000_menu_variants_classification",
   "20261013010000_cash_upi_split_payment",
   "20261013213000_add_product_stock_movements",
+  INVENTORY_REMOVAL_MIGRATION,
+  "20261027210000_restore_product_inventory",
+  "20261028143000_add_order_item_idempotency",
+  "20261028160000_add_combo_products_and_snapshots",
+  "20261028170000_add_combo_name_snapshot",
 ];
 
-function assertSafeMigrationSet(migrationsDirectory) {
+function assertSafeMigrationSet(migrationsDirectory, migrationHistory = []) {
   if (
     !existsSync(migrationsDirectory) ||
     !statSync(migrationsDirectory).isDirectory()
   ) {
     throw new Error(
       `Prisma migrations directory is missing: ${migrationsDirectory}`,
-    );
-  }
-
-  if (existsSync(path.join(migrationsDirectory, INVENTORY_REMOVAL_MIGRATION))) {
-    throw new Error(
-      `Automatic Prisma migrations are blocked because ${INVENTORY_REMOVAL_MIGRATION} removes product inventory. Reconcile the database migration history and approve a data-preserving migration plan before deployment.`,
     );
   }
 
@@ -54,7 +65,14 @@ function assertSafeMigrationSet(migrationsDirectory) {
         `Automatic Prisma migrations are blocked because migration ${migrationName} has no migration.sql file.`,
       );
     }
-    if (destructiveInventorySql.test(readFileSync(migrationFile, "utf8"))) {
+    const migrationSql = readFileSync(migrationFile, "utf8");
+    if (destructiveInventorySql.test(migrationSql)) {
+      if (
+        migrationName === INVENTORY_REMOVAL_MIGRATION &&
+        normalizeSql(migrationSql) === normalizeSql(INVENTORY_REMOVAL_SQL)
+      ) {
+        continue;
+      }
       throw new Error(
         `Automatic Prisma migrations are blocked because migration ${migrationName} contains SQL that removes product stock or stock-movement history.`,
       );
@@ -90,6 +108,76 @@ function assertSafeMigrationSet(migrationsDirectory) {
     }
     throw new Error(
       `Automatic Prisma migrations are blocked because required schema history is incomplete: ${missingResources.join(", ")}.`,
+    );
+  }
+
+  if (!Array.isArray(migrationHistory)) {
+    throw new Error(
+      "Automatic Prisma migrations are blocked because production migration history could not be verified.",
+    );
+  }
+  if (
+    migrationHistory.some(
+      (migration) => migration.migration_name === INVENTORY_REMOVAL_ALIAS,
+    )
+  ) {
+    throw new Error(
+      `Automatic Prisma migrations are blocked because the database contains the unsupported migration alias ${INVENTORY_REMOVAL_ALIAS}.`,
+    );
+  }
+  const removalMigration = migrationHistory.find(
+    (migration) => migration.migration_name === INVENTORY_REMOVAL_MIGRATION,
+  );
+  const removalMigrationSql = readFileSync(
+    path.join(
+      migrationsDirectory,
+      INVENTORY_REMOVAL_MIGRATION,
+      "migration.sql",
+    ),
+  );
+  const expectedRemovalChecksum = createHash("sha256")
+    .update(removalMigrationSql)
+    .digest("hex");
+  if (
+    !removalMigration ||
+    removalMigration.checksum !== expectedRemovalChecksum ||
+    !removalMigration.finished_at ||
+    removalMigration.rolled_back_at != null
+  ) {
+    throw new Error(
+      `Automatic Prisma migrations are blocked because ${INVENTORY_REMOVAL_MIGRATION} is not recorded as successfully applied with the packaged historical checksum.`,
+    );
+  }
+  const stockMovementMigration = migrationHistory.find(
+    (migration) => migration.migration_name === STOCK_MOVEMENT_MIGRATION,
+  );
+  if (stockMovementMigration) {
+    const stockMovementSql = readFileSync(
+      path.join(
+        migrationsDirectory,
+        STOCK_MOVEMENT_MIGRATION,
+        "migration.sql",
+      ),
+    );
+    const expectedStockMovementChecksum = createHash("sha256")
+      .update(stockMovementSql)
+      .digest("hex");
+    if (
+      stockMovementMigration.checksum !== expectedStockMovementChecksum ||
+      !stockMovementMigration.finished_at ||
+      stockMovementMigration.rolled_back_at != null
+    ) {
+      throw new Error(
+        `Automatic Prisma migrations are blocked because ${STOCK_MOVEMENT_MIGRATION} has an unrecognized or unsuccessful ledger entry.`,
+      );
+    }
+  } else if (
+    migrationHistory.some(
+      (migration) => migration.product_stock_movement_exists === true,
+    )
+  ) {
+    throw new Error(
+      `Automatic Prisma migrations are blocked because ${STOCK_MOVEMENT_MIGRATION} is absent from history but its table already exists.`,
     );
   }
 

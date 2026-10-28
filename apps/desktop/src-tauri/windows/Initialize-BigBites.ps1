@@ -13,6 +13,9 @@ $nodePath = Join-Path `
   "node-3602f2bb1a10f2cbab4c36886218a33c1ab3db87290e73b033c46c77147d0237\node.exe"
 $tsxPath = Join-Path $serverDir "node_modules\.bin\tsx.cmd"
 $seedPath = Join-Path $serverDir "prisma\seed\seed.ts"
+$menuImportReportPath = Join-Path `
+  $serverDir `
+  ("menu-import-report-{0}.json" -f [Guid]::NewGuid().ToString("N"))
 
 foreach ($requiredPath in @($envFile, $nodePath, $tsxPath, $seedPath)) {
   if (-not (Test-Path -LiteralPath $requiredPath)) {
@@ -47,13 +50,13 @@ if (
   $databaseUri.Port -ne 5432 -or
   $userInfo.Count -ne 2 -or
   [string]::IsNullOrEmpty($userInfo[1]) -or
-  $databaseRole -ne "bigbites_app" -or
-  $databaseName -ne "bigbites_client_local" -or
+  $databaseRole -ne "bigbites_client_delivery_app" -or
+  $databaseName -ne "bigbites_client_local_delivery_20261027" -or
   $databaseUri.Query -cne "?schema=public" -or
   $schemaParameters.Count -ne 1 -or
   $schemaParameters[0] -ne "public"
 ) {
-  throw "Initialization requires the exact local bigbites_client_local database, bigbites_app role, port 5432, and public schema. The configured database was not contacted."
+  throw "Initialization requires the exact local bigbites_client_local_delivery_20261027 database, bigbites_client_delivery_app role, port 5432, and public schema. The configured database was not contacted."
 }
 
 $confirmation = Read-Host `
@@ -110,6 +113,7 @@ $payloadBase64 = $null
 $exitCode = 1
 $previousDatabaseUrl = $env:DATABASE_URL
 $previousBootstrapFlag = $env:BIGBITES_INSTALL_BOOTSTRAP
+$previousMenuImportReportPath = $env:BIGBITES_MENU_IMPORT_REPORT
 
 try {
   $payloadJson = @{
@@ -122,6 +126,7 @@ try {
 
   $env:DATABASE_URL = $databaseUrl
   $env:BIGBITES_INSTALL_BOOTSTRAP = "CREATE_EMPTY_DATABASE"
+  $env:BIGBITES_MENU_IMPORT_REPORT = $menuImportReportPath
   Push-Location $serverDir
   try {
     $payloadBase64 | & $tsxPath $seedPath
@@ -134,6 +139,7 @@ try {
 finally {
   $env:DATABASE_URL = $previousDatabaseUrl
   $env:BIGBITES_INSTALL_BOOTSTRAP = $previousBootstrapFlag
+  $env:BIGBITES_MENU_IMPORT_REPORT = $previousMenuImportReportPath
   Remove-Variable payloadJson, payloadBase64 -ErrorAction SilentlyContinue
   Remove-Variable accounts -ErrorAction SilentlyContinue
   Remove-Variable password -ErrorAction SilentlyContinue
@@ -144,3 +150,4 @@ if ($exitCode -ne 0) {
 }
 
 Write-Host "Initial accounts and menu were created. Passwords were not displayed or logged."
+Write-Host "Menu import report saved to $menuImportReportPath."

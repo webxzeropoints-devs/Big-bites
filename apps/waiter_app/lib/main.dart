@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 
 import 'services/api_service.dart';
 import 'utils/currency.dart';
+import 'utils/inventory.dart';
 
 const _legacyVariantProducts = <String, List<String>>{
   'grill half': ['Grill', 'Half'],
@@ -420,6 +423,13 @@ class _TableScreenState extends State<TableScreen> {
             existingOrderTotalMinor: parseMinorUnits(
               activeOrder?['total']?.toString() ?? '0',
             ),
+            existingOrderItems: activeOrder == null
+                ? const []
+                : List<dynamic>.from(
+                    activeOrder['items'] is List
+                        ? activeOrder['items'] as List
+                        : const [],
+                  ),
           ),
         ),
       );
@@ -616,6 +626,7 @@ class MenuScreen extends StatefulWidget {
   final int? existingOrderId;
   final String? existingOrderStatus;
   final int existingOrderTotalMinor;
+  final List<dynamic> existingOrderItems;
 
   const MenuScreen({
     super.key,
@@ -627,6 +638,7 @@ class MenuScreen extends StatefulWidget {
     required this.existingOrderId,
     required this.existingOrderStatus,
     required this.existingOrderTotalMinor,
+    required this.existingOrderItems,
   });
 
   @override
@@ -646,12 +658,57 @@ class _MenuScreenState extends State<MenuScreen> {
   bool submitting = false;
   bool sendingToCashier = false;
   bool cancellingOrder = false;
+  late List<dynamic> currentOrderItems;
+  late int currentOrderTotalMinor;
+  late String currentOrderStatus;
+  final Map<String, String> pendingItemRequestKeys = {};
 
   String? error;
+
+  bool get orderSentToCashier =>
+      widget.existingOrder && currentOrderStatus != 'CONFIRMED';
+
+  String itemRequestKeyFor(int orderId, List<Map<String, dynamic>> items) {
+    final normalizedItems = List<Map<String, dynamic>>.from(items)
+      ..sort((left, right) {
+        final productComparison = (left['productId'] as int).compareTo(
+          right['productId'] as int,
+        );
+        if (productComparison != 0) return productComparison;
+        return ((left['variantId'] as int?) ?? 0).compareTo(
+          (right['variantId'] as int?) ?? 0,
+        );
+      });
+    final fingerprint = '$orderId:${jsonEncode(normalizedItems)}';
+    return pendingItemRequestKeys.putIfAbsent(fingerprint, () {
+      final random = Random.secure();
+      return List.generate(
+        4,
+        (_) => random.nextInt(1 << 32).toRadixString(16).padLeft(8, '0'),
+      ).join();
+    });
+  }
+
+  void clearItemRequestKey(int orderId, List<Map<String, dynamic>> items) {
+    final normalizedItems = List<Map<String, dynamic>>.from(items)
+      ..sort((left, right) {
+        final productComparison = (left['productId'] as int).compareTo(
+          right['productId'] as int,
+        );
+        if (productComparison != 0) return productComparison;
+        return ((left['variantId'] as int?) ?? 0).compareTo(
+          (right['variantId'] as int?) ?? 0,
+        );
+      });
+    pendingItemRequestKeys.remove('$orderId:${jsonEncode(normalizedItems)}');
+  }
 
   @override
   void initState() {
     super.initState();
+    currentOrderItems = List<dynamic>.from(widget.existingOrderItems);
+    currentOrderTotalMinor = widget.existingOrderTotalMinor;
+    currentOrderStatus = widget.existingOrderStatus ?? 'CONFIRMED';
     loadProducts();
   }
 
@@ -710,9 +767,24 @@ class _MenuScreenState extends State<MenuScreen> {
   String quantityKey(int productId, int? variantId) =>
       '$productId:${variantId ?? ''}';
 
-  void increaseQuantity(int productId, int? variantId) {
+  int selectedQuantityForProduct(int productId) {
+    var selectedQuantity = 0;
+    for (final entry in quantities.entries) {
+      final entryProductId = int.tryParse(entry.key.split(':').first);
+      if (entryProductId == productId) selectedQuantity += entry.value;
+    }
+    return selectedQuantity;
+  }
+
+  void increaseQuantity(int productId, int? variantId, {int? availableStock}) {
     final key = quantityKey(productId, variantId);
     final current = quantities[key] ?? 0;
+    if (!canAddInventoryQuantity(
+      selectedQuantity: selectedQuantityForProduct(productId),
+      availableStock: availableStock,
+    )) {
+      return;
+    }
 
     setState(() {
       quantities[key] = current + 1;
@@ -836,6 +908,30 @@ class _MenuScreenState extends State<MenuScreen> {
     }
   }
 
+  Future<void> refreshCurrentOrder() async {
+    final orderId = widget.existingOrderId;
+    if (orderId == null) return;
+
+    final order = await ApiService.getActiveTableOrder(
+      tableId: widget.tableId,
+      token: widget.token,
+    );
+    if (!mounted) return;
+    if (order == null || (order['id'] as num?)?.toInt() != orderId) {
+      throw Exception('The active order could not be refreshed');
+    }
+
+    setState(() {
+      currentOrderItems = List<dynamic>.from(
+        order['items'] is List ? order['items'] as List : const [],
+      );
+      currentOrderTotalMinor = parseMinorUnits(
+        order['total']?.toString() ?? '0',
+      );
+      currentOrderStatus = order['status']?.toString() ?? currentOrderStatus;
+    });
+  }
+
   Future<void> sendToCashier() async {
     final orderId = widget.existingOrderId;
     if (orderId == null) {
@@ -855,6 +951,7 @@ class _MenuScreenState extends State<MenuScreen> {
         final addItemsResult = await ApiService.addItemsToOrder(
           orderId: orderId,
           items: items,
+          idempotencyKey: itemRequestKeyFor(orderId, items),
           token: widget.token,
         );
         final addItemsStatusCode = addItemsResult['statusCode'] as int;
@@ -882,6 +979,12 @@ class _MenuScreenState extends State<MenuScreen> {
               ? data['message']
               : 'Failed to send order to cashier',
         );
+      }
+
+      await refreshCurrentOrder();
+      if (items.isNotEmpty) {
+        clearItemRequestKey(orderId, items);
+        setState(quantities.clear);
       }
 
       if (!mounted) return;
@@ -934,6 +1037,7 @@ class _MenuScreenState extends State<MenuScreen> {
           ? await ApiService.addItemsToOrder(
               orderId: widget.existingOrderId!,
               items: items,
+              idempotencyKey: itemRequestKeyFor(widget.existingOrderId!, items),
               token: widget.token,
             )
           : await ApiService.createOrder(
@@ -954,21 +1058,47 @@ class _MenuScreenState extends State<MenuScreen> {
         );
       }
 
+      final savedOrder = data is Map && data['order'] is Map
+          ? Map<String, dynamic>.from(data['order'] as Map)
+          : null;
+      if (savedOrder != null) {
+        setState(() {
+          currentOrderItems = List<dynamic>.from(
+            savedOrder['items'] is List
+                ? savedOrder['items'] as List
+                : const [],
+          );
+          currentOrderTotalMinor = parseMinorUnits(
+            savedOrder['total']?.toString() ?? '0',
+          );
+          currentOrderStatus =
+              savedOrder['status']?.toString() ?? currentOrderStatus;
+          quantities.clear();
+        });
+      }
+      if (widget.existingOrder) {
+        clearItemRequestKey(widget.existingOrderId!, items);
+      }
+
       if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            data['message']?.toString() ??
-                (widget.existingOrder
-                    ? 'Items added to order successfully'
-                    : 'Order created successfully'),
+            orderSentToCashier
+                ? 'Additional items sent to cashier'
+                : (data is Map ? data['message']?.toString() : null) ??
+                      (widget.existingOrder
+                          ? 'Items added to order successfully'
+                          : 'Order created successfully'),
           ),
           backgroundColor: Colors.green,
         ),
       );
 
-      Navigator.pop(context);
+      if (!widget.existingOrder || !orderSentToCashier) {
+        Navigator.pop(context);
+      }
     } catch (e) {
       if (!mounted) return;
 
@@ -991,7 +1121,16 @@ class _MenuScreenState extends State<MenuScreen> {
     final productId = (product['id'] as num).toInt();
 
     final name = product['name']?.toString() ?? 'Unknown';
-
+    final stockInitialized = product['lastStockUpdatedAt'] != null;
+    final stock = (product['stock'] as num?)?.toInt() ?? 0;
+    final stockUnit = product['stockUnit']?.toString() ?? 'pcs';
+    final lowStockThreshold =
+        (product['lowStockThreshold'] as num?)?.toInt() ?? 0;
+    final int? availableStock = stockInitialized ? stock : null;
+    final canAddQuantity = canAddInventoryQuantity(
+      selectedQuantity: selectedQuantityForProduct(productId),
+      availableStock: availableStock,
+    );
     final variants = product['variants'] is List
         ? (product['variants'] as List)
               .map((variant) => Map<String, dynamic>.from(variant))
@@ -1007,6 +1146,11 @@ class _MenuScreenState extends State<MenuScreen> {
     final classification =
         product['classification']?.toString() ??
         (product['isVegetarian'] == true ? 'VEG' : 'NON_VEG');
+    final comboItems = product['comboItems'] is List
+        ? (product['comboItems'] as List)
+              .map((item) => Map<String, dynamic>.from(item as Map))
+              .toList()
+        : <Map<String, dynamic>>[];
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1043,6 +1187,14 @@ class _MenuScreenState extends State<MenuScreen> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                  if (comboItems.isNotEmpty)
+                    Text(
+                      'Includes: ${comboItems.map((item) => '${item['quantity']} × ${item['name']}').join(', ')}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
                   if (variants.isNotEmpty)
                     DropdownButton<int>(
                       value: selectedVariantId,
@@ -1068,6 +1220,36 @@ class _MenuScreenState extends State<MenuScreen> {
                     formatMinorUnits(price),
                     style: TextStyle(fontSize: 15, color: Colors.grey.shade700),
                   ),
+                  if (stockInitialized)
+                    Text(
+                      stock <= 0
+                          ? 'OUT OF STOCK'
+                          : 'Available: $stock $stockUnit',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: stock <= 0 ? Colors.red : Colors.grey.shade700,
+                      ),
+                    )
+                  else
+                    Text(
+                      'Stock not initialized',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  if (stockInitialized &&
+                      stock > 0 &&
+                      stock <= lowStockThreshold)
+                    Text(
+                      'LOW STOCK',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.orange.shade800,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1091,8 +1273,13 @@ class _MenuScreenState extends State<MenuScreen> {
                   ),
                 ),
                 IconButton(
-                  onPressed: () =>
-                      increaseQuantity(productId, selectedVariantId),
+                  onPressed: canAddQuantity
+                      ? () => increaseQuantity(
+                          productId,
+                          selectedVariantId,
+                          availableStock: availableStock,
+                        )
+                      : null,
                   icon: const Icon(Icons.add_circle_outline),
                 ),
               ],
@@ -1103,7 +1290,48 @@ class _MenuScreenState extends State<MenuScreen> {
     );
   }
 
-  int get orderTotal => widget.existingOrderTotalMinor + selectedTotalMinor;
+  int get orderTotal => currentOrderTotalMinor + selectedTotalMinor;
+
+  Widget currentOrderItemTile(dynamic rawItem) {
+    if (rawItem is! Map) return const SizedBox.shrink();
+    final item = Map<String, dynamic>.from(rawItem);
+    final product = item['product'] is Map
+        ? Map<String, dynamic>.from(item['product'] as Map)
+        : const <String, dynamic>{};
+    final variant = item['variant'] is Map
+        ? Map<String, dynamic>.from(item['variant'] as Map)
+        : const <String, dynamic>{};
+    final productName =
+        item['comboNameSnapshot']?.toString() ??
+        product['name']?.toString() ??
+        'Menu item';
+    final variantName = variant['name']?.toString();
+    final comboItems = item['comboSnapshot'] is List
+        ? item['comboSnapshot'] as List
+        : product['comboItems'] is List
+        ? product['comboItems'] as List
+        : const [];
+
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: Text(
+        variantName == null || variantName.isEmpty
+            ? productName
+            : '$productName · $variantName',
+      ),
+      trailing: Text('×${item['quantity'] ?? 0}'),
+      subtitle: comboItems.isEmpty
+          ? null
+          : Text(
+              'Includes: ${comboItems.map((raw) {
+                final component = Map<String, dynamic>.from(raw as Map);
+                final includedQuantity = ((component['quantity'] as num?)?.toInt() ?? 1) * ((item['quantity'] as num?)?.toInt() ?? 1);
+                return '$includedQuantity × ${component['name']}';
+              }).join(', ')}',
+            ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1173,8 +1401,9 @@ class _MenuScreenState extends State<MenuScreen> {
           (right['id'] as num?)?.toInt() ?? 0,
         );
       });
-    final orderSentToCashier =
-        widget.existingOrder && widget.existingOrderStatus != 'CONFIRMED';
+    final existingOrderSummaryCount = widget.existingOrder
+        ? currentOrderItems.length + 1
+        : 0;
 
     return Scaffold(
       appBar: AppBar(
@@ -1185,45 +1414,7 @@ class _MenuScreenState extends State<MenuScreen> {
           style: const TextStyle(fontWeight: FontWeight.bold),
         ),
       ),
-      body: orderSentToCashier
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      Icons.receipt_long,
-                      size: 56,
-                      color: Colors.deepOrange,
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Order #${widget.existingOrderId} sent to cashier',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Order total: ${formatMinorUnits(orderTotal)}',
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'No more items can be added. The table will be available after payment or cancellation.',
-                      textAlign: TextAlign.center,
-                    ),
-                  ],
-                ),
-              ),
-            )
-          : loading
+      body: loading
           ? const Center(child: CircularProgressIndicator())
           : error != null
           ? Center(
@@ -1246,9 +1437,30 @@ class _MenuScreenState extends State<MenuScreen> {
                     onRefresh: loadProducts,
                     child: ListView.builder(
                       padding: const EdgeInsets.all(16),
-                      itemCount: visibleProducts.length + 2,
+                      itemCount:
+                          visibleProducts.length +
+                          2 +
+                          existingOrderSummaryCount,
                       itemBuilder: (context, index) {
-                        if (index == 0) {
+                        if (index < existingOrderSummaryCount) {
+                          if (index == 0) {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 6),
+                              child: Text(
+                                'ORDER #${widget.existingOrderId} · ${orderSentToCashier ? 'SENT TO CASHIER' : 'IN PROGRESS'} · ${formatMinorUnits(currentOrderTotalMinor)}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            );
+                          }
+                          return currentOrderItemTile(
+                            currentOrderItems[index - 1],
+                          );
+                        }
+
+                        final menuIndex = index - existingOrderSummaryCount;
+                        if (menuIndex == 0) {
                           return Padding(
                             padding: const EdgeInsets.only(bottom: 12),
                             child: TextField(
@@ -1262,7 +1474,7 @@ class _MenuScreenState extends State<MenuScreen> {
                             ),
                           );
                         }
-                        if (index == 1) {
+                        if (menuIndex == 1) {
                           return SizedBox(
                             height: 48,
                             child: ListView(
@@ -1309,7 +1521,9 @@ class _MenuScreenState extends State<MenuScreen> {
                           );
                         }
                         return productCard(
-                          Map<String, dynamic>.from(visibleProducts[index - 2]),
+                          Map<String, dynamic>.from(
+                            visibleProducts[menuIndex - 2],
+                          ),
                         );
                       },
                     ),
@@ -1317,137 +1531,123 @@ class _MenuScreenState extends State<MenuScreen> {
                 ),
               ],
             ),
-      bottomNavigationBar: orderSentToCashier
-          ? null
-          : SafeArea(
-              child: Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surface,
-                  boxShadow: const [
-                    BoxShadow(blurRadius: 8, offset: Offset(0, -2)),
-                  ],
-                ),
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    final narrow = constraints.maxWidth < 380;
-                    final total = Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            widget.existingOrder ? 'ORDER TOTAL' : 'TOTAL',
-                            style: const TextStyle(fontSize: 12),
-                          ),
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            boxShadow: const [BoxShadow(blurRadius: 8, offset: Offset(0, -2))],
+          ),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final narrow = constraints.maxWidth < 380;
+              final total = Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.existingOrder ? 'ORDER TOTAL' : 'TOTAL',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  Text(
+                    formatMinorUnits(orderTotal),
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              );
+              final confirmButton = FilledButton.icon(
+                onPressed: submitting ? null : submitOrder,
+                style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+                icon: submitting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
                         ),
-                        Text(
-                          formatMinorUnits(orderTotal),
-                          style: const TextStyle(
-                            fontSize: 22,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    );
-                    final confirmButton = FilledButton.icon(
-                      onPressed: submitting ? null : submitOrder,
-                      style: FilledButton.styleFrom(
-                        minimumSize: const Size(0, 48),
-                      ),
-                      icon: submitting
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Icon(Icons.check),
-                      label: const Text('CONFIRM ORDER'),
-                    );
+                      )
+                    : const Icon(Icons.check),
+                label: const Text('CONFIRM ORDER'),
+              );
 
-                    if (!widget.existingOrder) {
-                      return Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          total,
-                          const SizedBox(height: 8),
-                          confirmButton,
-                        ],
-                      );
-                    }
+              if (!widget.existingOrder) {
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [total, const SizedBox(height: 8), confirmButton],
+                );
+              }
 
-                    final addFoodButton = FilledButton(
-                      onPressed: submitting || sendingToCashier
-                          ? null
-                          : submitOrder,
-                      style: FilledButton.styleFrom(
-                        minimumSize: const Size(0, 48),
+              final addFoodButton = FilledButton(
+                onPressed: submitting || sendingToCashier ? null : submitOrder,
+                style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+                child: Text(orderSentToCashier ? 'ADD TO ORDER' : 'ADD FOOD'),
+              );
+              final sendButton = OutlinedButton(
+                onPressed: submitting || sendingToCashier || cancellingOrder
+                    ? null
+                    : sendToCashier,
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 48)),
+                child: sendingToCashier
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(
+                        orderSentToCashier
+                            ? 'ADD & SEND TO CASHIER'
+                            : 'SEND TO CASHIER',
                       ),
-                      child: const Text('ADD FOOD'),
-                    );
-                    final sendButton = OutlinedButton(
-                      onPressed:
-                          submitting || sendingToCashier || cancellingOrder
-                          ? null
-                          : sendToCashier,
-                      style: OutlinedButton.styleFrom(
-                        minimumSize: const Size(0, 48),
-                      ),
-                      child: sendingToCashier
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Text('SEND TO CASHIER'),
-                    );
-                    final cancelButton = TextButton.icon(
-                      onPressed:
-                          submitting || sendingToCashier || cancellingOrder
-                          ? null
-                          : cancelOrder,
-                      style: TextButton.styleFrom(
-                        foregroundColor: Colors.red.shade700,
-                        minimumSize: const Size(0, 48),
-                      ),
-                      icon: cancellingOrder
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.cancel_outlined),
-                      label: const Text('CANCEL ORDER'),
-                    );
-
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        total,
-                        const SizedBox(height: 8),
-                        addFoodButton,
-                        const SizedBox(height: 6),
-                        if (narrow) ...[
-                          sendButton,
-                          const SizedBox(height: 6),
-                          cancelButton,
-                        ] else
-                          Row(
-                            children: [
-                              Expanded(child: sendButton),
-                              const SizedBox(width: 8),
-                              Expanded(child: cancelButton),
-                            ],
-                          ),
-                      ],
-                    );
-                  },
+              );
+              final cancelButton = TextButton.icon(
+                onPressed: submitting || sendingToCashier || cancellingOrder
+                    ? null
+                    : cancelOrder,
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.red.shade700,
+                  minimumSize: const Size(0, 48),
                 ),
-              ),
-            ),
+                icon: cancellingOrder
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.cancel_outlined),
+                label: const Text('CANCEL ORDER'),
+              );
+
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  total,
+                  const SizedBox(height: 8),
+                  addFoodButton,
+                  const SizedBox(height: 6),
+                  if (narrow) ...[
+                    sendButton,
+                    const SizedBox(height: 6),
+                    cancelButton,
+                  ] else
+                    Row(
+                      children: [
+                        Expanded(child: sendButton),
+                        const SizedBox(width: 8),
+                        Expanded(child: cancelButton),
+                      ],
+                    ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
     );
   }
 }

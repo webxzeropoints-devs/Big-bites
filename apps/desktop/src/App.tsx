@@ -29,7 +29,7 @@ const PRODUCTION_CATALOG_SYNC_ENABLED =
   import.meta.env.VITE_ENABLE_PRODUCTION_CATALOG_SYNC === "true";
 const ORDER_REPORTS_FOLDER_KEY = "big-bites-order-reports-folder";
 const RESTAURANT_NAME = "BIG BITES FAMILY RESTAURANT";
-const RECEIPT_RESTAURANT_NAME = "BIG BITES FAMILY\nRESTAURANT";
+const RECEIPT_RESTAURANT_NAME = "BIG BITES FAMILY RESTAURANT";
 
 async function confirmAction(
   message: string,
@@ -48,6 +48,7 @@ type UserRole = "ADMIN" | "CASHIER" | "WAITER";
 type User = { id: number; name: string; username: string; role: UserRole };
 type Category = { id: number; name: string; sortOrder?: number; _count?: { products: number } };
 type ProductVariant = { id: number; name: string; price: number | string; isActive?: boolean };
+type ComboComponent = { name: string; quantity: number };
 type Product = {
   id: number;
   slug?: string;
@@ -59,9 +60,14 @@ type Product = {
   isVegetarian?: boolean;
   isSignature?: boolean;
   isActive: boolean;
+  stock?: number;
+  stockUnit?: string;
+  lowStockThreshold?: number;
+  lastStockUpdatedAt?: string | null;
   categoryId: number;
   category?: { id: number; name: string; sortOrder?: number };
   variants?: ProductVariant[];
+  comboItems?: ComboComponent[] | null;
 };
 type Table = { id: number; number: number; status: string; isParcel?: boolean };
 type OrderItem = {
@@ -69,7 +75,9 @@ type OrderItem = {
   quantity: number;
   unitPrice: string | number;
   subtotal: string | number;
-  product: { name: string };
+  comboSnapshot?: ComboComponent[] | null;
+  comboNameSnapshot?: string | null;
+  product: { name: string; comboItems?: ComboComponent[] | null };
   variant?: { name: string } | null;
 };
 
@@ -556,13 +564,16 @@ function ReceiptPreview({
       : paymentMethod ?? (paid ? "PAID" : "UNPAID");
   const gstCharged = order.gstEnabled !== false;
   const receiptDate = new Date(order.payment?.paidAt ?? order.createdAt);
-  const dateTime = Number.isNaN(receiptDate.getTime())
+  const dateLabel = Number.isNaN(receiptDate.getTime())
     ? "Date unavailable"
     : `${String(receiptDate.getDate()).padStart(2, "0")}/${String(
         receiptDate.getMonth() + 1,
-      ).padStart(2, "0")}/${receiptDate.getFullYear()} ${String(
-        receiptDate.getHours(),
-      ).padStart(2, "0")}:${String(receiptDate.getMinutes()).padStart(2, "0")}`;
+      ).padStart(2, "0")}/${receiptDate.getFullYear()}`;
+  const timeLabel = Number.isNaN(receiptDate.getTime())
+    ? "Time unavailable"
+    : `${String(receiptDate.getHours()).padStart(2, "0")}:${String(
+        receiptDate.getMinutes(),
+      ).padStart(2, "0")}`;
 
   return createPortal(
     <div
@@ -627,11 +638,19 @@ function ReceiptPreview({
             </div>
             <div>
               <span>Date:</span>
-              <strong>{dateTime}</strong>
+              <strong>{dateLabel}</strong>
+            </div>
+            <div>
+              <span>Time:</span>
+              <strong>{timeLabel}</strong>
+            </div>
+            <div>
+              <span>Order Type:</span>
+              <strong>{order.table?.isParcel ? "Parcel" : "Dine-in"}</strong>
             </div>
             {!order.table?.isParcel && (
               <div>
-                <span>Table:</span>
+                <span>Table No:</span>
                 <strong>{order.table?.number ?? "—"}</strong>
               </div>
             )}
@@ -651,19 +670,33 @@ function ReceiptPreview({
               <span>Total</span>
             </div>
 
-            {items.map((item) => (
-              <div key={item.id}>
-                <div className="receipt-row">
-                  <span className="receipt-item-name">
-                    {item.product.name}{item.variant ? ` - ${item.variant.name}` : ""}
-                  </span>
-                  <span>{item.quantity}</span>
-                  <span>{money(item.unitPrice)}</span>
-                  <span>{money(item.subtotal)}</span>
+            {items.map((item) => {
+              const comboItems = item.comboSnapshot ?? item.product.comboItems ?? [];
+              return (
+                <div key={item.id}>
+                  <div className="receipt-row">
+                    <span className="receipt-item-name">
+                      {item.comboNameSnapshot ?? item.product.name}{item.variant ? ` - ${item.variant.name}` : ""}
+                    </span>
+                    <span>{item.quantity}</span>
+                    <span>{money(item.unitPrice)}</span>
+                    <span>{money(item.subtotal)}</span>
+                  </div>
+                  {comboItems.map((component) => (
+                    <div
+                      className="receipt-row receipt-combo-component"
+                      key={`${item.id}-${component.name}`}
+                    >
+                      <span>{component.name}</span>
+                      <span>{component.quantity * item.quantity}</span>
+                      <span>Included</span>
+                      <span>Included</span>
+                    </div>
+                  ))}
+                  <div className="receipt-item-divider" aria-hidden="true" />
                 </div>
-                <div className="receipt-item-divider" aria-hidden="true" />
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <hr className="receipt-divider" />
@@ -1242,19 +1275,27 @@ function BillingScreen({
               )}
 
               <div className="bill-items">
-                {(Array.isArray(selected.items) ? selected.items : []).map((item) => (
-                  <div className="bill-item" key={item.id}>
-                    <div>
-                      <strong>
-                        {item.product.name}{item.variant ? ` - ${item.variant.name}` : ""}
-                      </strong>
-                      <span>
-                        {item.quantity} × {money(item.unitPrice)}
-                      </span>
+                {(Array.isArray(selected.items) ? selected.items : []).map((item) => {
+                  const comboItems = item.comboSnapshot ?? item.product.comboItems ?? [];
+                  return (
+                    <div className="bill-item" key={item.id}>
+                      <div>
+                        <strong>
+                          {item.comboNameSnapshot ?? item.product.name}{item.variant ? ` - ${item.variant.name}` : ""}
+                        </strong>
+                        <span>
+                          {item.quantity} × {money(item.unitPrice)}
+                        </span>
+                        {comboItems.map((component) => (
+                          <span className="combo-item-detail" key={`${item.id}-${component.name}`}>
+                            {component.quantity * item.quantity} × {component.name} · Included
+                          </span>
+                        ))}
+                      </div>
+                      <strong>{money(item.subtotal)}</strong>
                     </div>
-                    <strong>{money(item.subtotal)}</strong>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="bill-summary">
@@ -1572,6 +1613,14 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
   const [catalogSyncMessage, setCatalogSyncMessage] = useState("");
   const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
   const [productModalOpen, setProductModalOpen] = useState(false);
+  const [stockProduct, setStockProduct] = useState<Product | null>(null);
+  const [stockSaving, setStockSaving] = useState(false);
+  const [stockForm, setStockForm] = useState({
+    newStock: "",
+    stockUnit: "pcs",
+    lowStockThreshold: "0",
+    reason: "",
+  });
   const [tableModalOpen, setTableModalOpen] = useState(false);
   const [waiterModalOpen, setWaiterModalOpen] = useState(false);
   const [deletingUserId, setDeletingUserId] = useState<number | null>(null);
@@ -2066,6 +2115,57 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
     }
   };
 
+  const openStockEditor = (product: Product) => {
+    setStockProduct(product);
+    setStockForm({
+      newStock: product.lastStockUpdatedAt == null ? "" : String(product.stock ?? 0),
+      stockUnit: product.stockUnit ?? "pcs",
+      lowStockThreshold: String(product.lowStockThreshold ?? 0),
+      reason: "",
+    });
+  };
+
+  const saveStock = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!stockProduct) return;
+    const newStock = Number(stockForm.newStock);
+    const lowStockThreshold = Number(stockForm.lowStockThreshold);
+    const stockUnit = stockForm.stockUnit.trim();
+    if (
+      !Number.isInteger(newStock) ||
+      newStock < 0 ||
+      !Number.isInteger(lowStockThreshold) ||
+      lowStockThreshold < 0 ||
+      !stockUnit
+    ) {
+      setError("Enter a non-negative stock count and threshold, and a stock unit.");
+      return;
+    }
+    setStockSaving(true);
+    try {
+      await request(
+        `/api/admin/products/${stockProduct.id}/stock`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            newStock,
+            stockUnit,
+            lowStockThreshold,
+            reason: stockForm.reason.trim(),
+          }),
+        },
+        token,
+      );
+      setStockProduct(null);
+      setError("");
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save stock");
+    } finally {
+      setStockSaving(false);
+    }
+  };
+
   const saveCategory = async (event: FormEvent) => {
     event.preventDefault();
     const name = categoryName.trim();
@@ -2436,6 +2536,7 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                       <th>Name</th>
                       <th>Category</th>
                       <th>Price</th>
+                      <th>Stock</th>
                       <th>Status</th>
                       <th>Actions</th>
                     </tr>
@@ -2443,7 +2544,7 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                   <tbody>
                     {visibleProducts.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="empty-state">
+                        <td colSpan={6} className="empty-state">
                           {products.length === 0
                             ? "No menu items are stored on this local POS yet. An administrator can sync the production menu while online."
                             : "No menu items match this search."}
@@ -2477,6 +2578,26 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
                           </td>
                           <td>{product.category?.name ?? product.categoryId}                                                    </td>
                           <td>{money(product.price)}</td>
+                          <td>
+                            {product.lastStockUpdatedAt == null ? (
+                              <span className="status-text neutral">Not initialized</span>
+                            ) : (
+                              <>
+                                <span>{product.stock ?? 0} {product.stockUnit ?? "pcs"}</span>
+                                {(product.stock ?? 0) <= (product.lowStockThreshold ?? 0) && (
+                                  <div className="tiny-meta">Low stock</div>
+                                )}
+                              </>
+                            )}
+                            <div>
+                              <button
+                                className="secondary-btn small"
+                                onClick={() => openStockEditor(product)}
+                              >
+                                {product.lastStockUpdatedAt == null ? "Set count" : "Adjust"}
+                              </button>
+                            </div>
+                          </td>
                           <td>
                             <span className={product.isActive ? "status-text success" : "status-text danger"}>
                               {product.isActive ? "Active" : "Inactive"}
@@ -3161,6 +3282,85 @@ function AdminScreen({ token, role }: { token: string; role: UserRole }) {
         </div>
       )}
 
+      {stockProduct && (
+        <div className="modal-backdrop" onClick={() => !stockSaving && setStockProduct(null)}>
+          <div className="modal-card compact-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <div className="eyebrow">Inventory</div>
+                <h3>{stockProduct.lastStockUpdatedAt == null ? "Initialize stock" : "Adjust stock"}</h3>
+                <p>{stockProduct.name}</p>
+              </div>
+              <button
+                className="icon-btn"
+                onClick={() => setStockProduct(null)}
+                aria-label="Close stock form"
+                disabled={stockSaving}
+              >
+                ×
+              </button>
+            </div>
+            {stockProduct.lastStockUpdatedAt == null && (
+              <p className="page-subtitle">
+                Enter the physical count confirmed by the restaurant. Until initialized, orders are not stock-limited.
+              </p>
+            )}
+            <form className="product-form" onSubmit={saveStock}>
+              <div className="two-col">
+                <label>
+                  On-hand count
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    required
+                    value={stockForm.newStock}
+                    onChange={(event) => setStockForm((current) => ({ ...current, newStock: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  Unit
+                  <input
+                    required
+                    maxLength={24}
+                    value={stockForm.stockUnit}
+                    onChange={(event) => setStockForm((current) => ({ ...current, stockUnit: event.target.value }))}
+                  />
+                </label>
+              </div>
+              <label>
+                Low-stock alert at
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  required
+                  value={stockForm.lowStockThreshold}
+                  onChange={(event) => setStockForm((current) => ({ ...current, lowStockThreshold: event.target.value }))}
+                />
+              </label>
+              <label>
+                Reason
+                <input
+                  maxLength={200}
+                  value={stockForm.reason}
+                  onChange={(event) => setStockForm((current) => ({ ...current, reason: event.target.value }))}
+                  placeholder="Optional audit note"
+                />
+              </label>
+              <div className="modal-actions">
+                <button type="button" className="secondary-btn" onClick={() => setStockProduct(null)} disabled={stockSaving}>
+                  Cancel
+                </button>
+                <button type="submit" className="primary-btn" disabled={stockSaving}>
+                  {stockSaving ? "Saving..." : "Save stock"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {tableModalOpen && (
         <div className="modal-backdrop" onClick={() => setTableModalOpen(false)}>
           <div className="modal-card compact-modal" onClick={(event) => event.stopPropagation()}>
@@ -3308,10 +3508,42 @@ function WaiterModeScreen({ token }: { token: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [cancellingOrder, setCancellingOrder] = useState(false);
   const submittingRef = useRef(false);
+  const pendingAddItemsKeys = useRef(new Map<string, string>());
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
   const selectedTable = tables.find((table) => table.id === selectedTableId) ?? null;
+
+  function addItemsRequestKey(
+    orderId: number,
+    items: Array<{ productId: number; variantId?: number; quantity: number }>,
+  ) {
+    const normalizedItems = [...items].sort(
+      (left, right) =>
+        left.productId - right.productId ||
+        (left.variantId ?? 0) - (right.variantId ?? 0),
+    );
+    const fingerprint = `${orderId}:${JSON.stringify(normalizedItems)}`;
+    const existing = pendingAddItemsKeys.current.get(fingerprint);
+    if (existing) return existing;
+    const key = crypto.randomUUID();
+    pendingAddItemsKeys.current.set(fingerprint, key);
+    return key;
+  }
+
+  function clearAddItemsRequestKey(
+    orderId: number,
+    items: Array<{ productId: number; variantId?: number; quantity: number }>,
+  ) {
+    const normalizedItems = [...items].sort(
+      (left, right) =>
+        left.productId - right.productId ||
+        (left.variantId ?? 0) - (right.variantId ?? 0),
+    );
+    pendingAddItemsKeys.current.delete(
+      `${orderId}:${JSON.stringify(normalizedItems)}`,
+    );
+  }
   const orderedMenuCategories = useMemo(
     () =>
       [...categories].sort(
@@ -3484,11 +3716,18 @@ function WaiterModeScreen({ token }: { token: string }) {
       const body = activeOrderId
         ? { items }
         : { tableId: selectedTableId, items };
+      const idempotencyKey = activeOrderId
+        ? addItemsRequestKey(activeOrderId, items)
+        : undefined;
 
       const response = await request(endpoint, {
         method: activeOrderId ? "PATCH" : "POST",
+        ...(idempotencyKey
+          ? { headers: { "Idempotency-Key": idempotencyKey } }
+          : {}),
         body: JSON.stringify(body),
       }, token);
+      if (activeOrderId) clearAddItemsRequestKey(activeOrderId, items);
 
       const createdOrderId = Number((response as { order?: { id?: number; total?: string | number } })?.order?.id);
       const createdOrderTotal = parseMinorUnits(
@@ -3733,6 +3972,11 @@ function WaiterModeScreen({ token }: { token: string }) {
                                 : "Vegetarian"}
                             {product.isSignature ? " · Signature" : ""}
                           </span>
+                          {product.comboItems?.map((component) => (
+                            <span className="combo-item-detail" key={`${product.id}-${component.name}`}>
+                              {component.quantity} × {component.name} · Included
+                            </span>
+                          ))}
                           {product.variants && product.variants.length > 0 && (
                             <select
                               aria-label={`${product.name} size`}

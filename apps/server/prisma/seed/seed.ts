@@ -4,7 +4,10 @@ import {
   ProductClassification,
 } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import "dotenv/config";
+import { COMBO_CATALOG, type ComboComponent } from "../../src/catalog/comboCatalog.js";
 import { hashPassword } from "../../src/utils/password.js";
 
 function getDatabaseUrl(): string {
@@ -38,6 +41,7 @@ type MenuProduct = {
   subcategory?: string;
   signature?: boolean;
   variants?: { name: string; price: number }[];
+  comboItems?: ComboComponent[];
 };
 
 const VEG = ProductClassification.VEG;
@@ -60,6 +64,7 @@ const categories = [
   "Beverages",
   "Shawarma",
   "Big Bites Signature Dish",
+  ...COMBO_CATALOG.map((combo) => combo.category),
 ];
 
 function items(
@@ -265,7 +270,130 @@ const menu: MenuProduct[] = [
     ["Pot Shawarma", 140, true],
     ["Thuku Shawarma", 180, true],
   ]),
+  ...COMBO_CATALOG.map((combo) => ({
+    category: combo.category,
+    name: combo.name,
+    price: Number(combo.price),
+    classification: NOT_APPLICABLE,
+    comboItems: combo.items,
+  })),
 ];
+
+async function writeMenuImportReport(
+  importCounts: {
+    createdProducts: number;
+    updatedProducts: number;
+    createdVariants: number;
+    updatedVariants: number;
+  },
+  duplicateCandidates: {
+    name: string;
+    category: string;
+    productIds: number[];
+  }[],
+) {
+  const reportPath = process.env.BIGBITES_MENU_IMPORT_REPORT;
+  if (!reportPath) return;
+
+  const report = {
+    generatedAt: new Date().toISOString(),
+    summary: {
+      categories: categories.length,
+      products: menu.length,
+      variants: menu.reduce(
+        (count, product) => count + (product.variants?.length ?? 0),
+        0,
+      ),
+      prices: menu.reduce(
+        (count, product) => count + (product.variants?.length || 1),
+        0,
+      ),
+      ...importCounts,
+    },
+    sources: [
+      ...Array.from({ length: 8 }, (_, index) => `menu/${index + 1}.jpg`),
+      "October 2026 (3).xlsx was an order-history report, not a menu catalog; it was not used for product prices.",
+    ],
+    skippedRecords: [],
+    duplicateCandidates,
+    unresolvedIssues: [],
+    items: menu.map((product) => ({
+      category: product.category,
+      name: product.name,
+      price: product.price,
+      classification: product.classification,
+      ...(product.subcategory ? { subcategory: product.subcategory } : {}),
+      ...(product.signature ? { signature: true } : {}),
+      ...(product.variants ? { variants: product.variants } : {}),
+      ...(product.comboItems ? { comboItems: product.comboItems } : {}),
+    })),
+  };
+
+  await mkdir(dirname(reportPath), { recursive: true });
+  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+}
+
+function assertMenuMatchesSource(
+  importedMenu: {
+    slug: string;
+    name: string;
+    price: Prisma.Decimal;
+    classification: ProductClassification;
+    isVegetarian: boolean;
+    subcategory: string | null;
+    isSignature: boolean;
+    category: { name: string };
+    variants: { name: string; price: Prisma.Decimal }[];
+    comboItems: Prisma.JsonValue | null;
+  }[],
+) {
+  const importedBySlug = new Map(
+    importedMenu.map((product) => [product.slug, product]),
+  );
+  if (importedBySlug.size !== menu.length) {
+    throw new Error(
+      "Imported menu verification failed: product count differs from the source.",
+    );
+  }
+
+  for (const expected of menu) {
+    const slug = `${slugify(expected.category)}-${slugify(expected.name)}`;
+    const imported = importedBySlug.get(slug);
+    if (
+      !imported ||
+      imported.name !== expected.name ||
+      imported.category.name !== expected.category ||
+      Number(imported.price) !== expected.price ||
+      imported.classification !== expected.classification ||
+      imported.isVegetarian !== (expected.classification === VEG) ||
+      imported.subcategory !== (expected.subcategory ?? null) ||
+      imported.isSignature !== (expected.signature ?? false) ||
+      JSON.stringify(imported.comboItems) !==
+        JSON.stringify(expected.comboItems ?? null)
+    ) {
+      throw new Error(
+        `Imported menu verification failed for ${expected.category}/${expected.name}.`,
+      );
+    }
+
+    const expectedVariants = expected.variants ?? [];
+    if (imported.variants.length !== expectedVariants.length) {
+      throw new Error(
+        `Imported variant verification failed for ${expected.category}/${expected.name}.`,
+      );
+    }
+    for (const variant of expectedVariants) {
+      const importedVariant = imported.variants.find(
+        (candidate) => candidate.name === variant.name,
+      );
+      if (!importedVariant || Number(importedVariant.price) !== variant.price) {
+        throw new Error(
+          `Imported variant verification failed for ${expected.category}/${expected.name}.`,
+        );
+      }
+    }
+  }
+}
 
 function slugify(value: string) {
   return value
@@ -393,10 +521,12 @@ async function assertDatabaseSafeForInstallerBootstrap(
         'RestaurantTable',
         'Category',
         'Product',
+        'ProductStockMovement',
         'ProductVariant',
         'Order',
         'RestaurantSettings',
         'OrderItem',
+        'OrderItemSubmission',
         'Payment'
       )
   `;
@@ -563,6 +693,7 @@ async function createInitialMenu(tx: Prisma.TransactionClient) {
         isVegetarian: classification === VEG,
         subcategory: product.subcategory ?? null,
         isSignature: product.signature ?? false,
+        comboItems: product.comboItems ?? Prisma.DbNull,
       },
     });
 
@@ -617,15 +748,16 @@ async function initializeEmptyDatabase() {
     target.protocol !== "postgresql:" ||
     !["localhost", "127.0.0.1", "[::1]", "::1"].includes(target.hostname) ||
     target.port !== "5432" ||
-    decodeURIComponent(target.username) !== "bigbites_app" ||
+    decodeURIComponent(target.username) !== "bigbites_client_delivery_app" ||
     !target.password ||
-    decodeURIComponent(target.pathname.replace(/^\/+/, "")) !== "bigbites" ||
+    decodeURIComponent(target.pathname.replace(/^\/+/, "")) !==
+      "bigbites_client_local_delivery_20261027" ||
     target.search !== "?schema=public" ||
     schemaParameters.length !== 1 ||
     schemaParameters[0] !== "public"
   ) {
     throw new Error(
-      "Installer initialization requires the exact local bigbites database, bigbites_app role, port 5432, and public schema; the configured database was not contacted.",
+      "Installer initialization requires the exact local bigbites_client_local_delivery_20261027 database, bigbites_client_delivery_app role, port 5432, and public schema; the configured database was not contacted.",
     );
   }
 
@@ -637,6 +769,22 @@ async function initializeEmptyDatabase() {
       await assertDatabaseSafeForInstallerBootstrap(tx);
 
       const menuResult = await createInitialMenu(tx);
+      const importedMenu = await tx.product.findMany({
+        where: {
+          slug: {
+            in: menu.map(
+              (product) =>
+                `${slugify(product.category)}-${slugify(product.name)}`,
+            ),
+          },
+          isActive: true,
+        },
+        include: {
+          category: true,
+          variants: { where: { isActive: true } },
+        },
+      });
+      assertMenuMatchesSource(importedMenu);
       const accountCount = await createInitialAccounts(tx, input.accounts);
 
       return {
@@ -651,6 +799,12 @@ async function initializeEmptyDatabase() {
     },
   );
 
+  await writeMenuImportReport({
+    createdProducts: result.products,
+    updatedProducts: 0,
+    createdVariants: result.variants,
+    updatedVariants: 0,
+  }, []);
   console.log(
     `Initialized an empty local database with ${result.categories} categories, ${result.products} products, ${result.variants} variants, and ${result.accounts} accounts.`,
   );
@@ -670,129 +824,184 @@ async function main() {
     `Updating menu only in ${target.hostname}/${database[0].database}.`,
   );
 
-  const categoryIds = new Map<string, number>();
-  for (const [index, name] of categories.entries()) {
-    const existing = await prisma.category.findFirst({
-      where: { name: { equals: name, mode: "insensitive" } },
-    });
-    const category = existing
-      ? await prisma.category.update({
-          where: { id: existing.id },
-          data: { name, sortOrder: index },
-        })
-      : await prisma.category.create({
-          data: { name, sortOrder: index },
+  const importResult = await prisma.$transaction(
+    async (tx) => {
+      const categoryIds = new Map<string, number>();
+      for (const [index, name] of categories.entries()) {
+        const existing = await tx.category.findFirst({
+          where: { name: { equals: name, mode: "insensitive" } },
         });
-    categoryIds.set(name, category.id);
-  }
+        const category = existing
+          ? await tx.category.update({
+              where: { id: existing.id },
+              data: { name, sortOrder: index },
+            })
+          : await tx.category.create({
+              data: { name, sortOrder: index },
+            });
+        categoryIds.set(name, category.id);
+      }
 
-  let createdProducts = 0;
-  let updatedProducts = 0;
-  let createdVariants = 0;
-  let updatedVariants = 0;
+      let createdProducts = 0;
+      let updatedProducts = 0;
+      let createdVariants = 0;
+      let updatedVariants = 0;
+      const duplicateCandidates: {
+        name: string;
+        category: string;
+        productIds: number[];
+      }[] = [];
 
-  for (const product of menu) {
-    const categoryId = categoryIds.get(product.category);
-    if (!categoryId) throw new Error(`Missing category ${product.category}`);
+      for (const product of menu) {
+        const categoryId = categoryIds.get(product.category);
+        if (!categoryId) throw new Error(`Missing category ${product.category}`);
 
-    const slug = `${slugify(product.category)}-${slugify(product.name)}`;
-    const bySlug = await prisma.product.findUnique({ where: { slug } });
-    const matchingProducts = bySlug
-      ? [bySlug]
-      : await prisma.product.findMany({
-          where: { name: product.name },
-          orderBy: [{ isActive: "desc" }, { id: "asc" }],
+        const slug = `${slugify(product.category)}-${slugify(product.name)}`;
+        const bySlug = await tx.product.findUnique({ where: { slug } });
+        const matchingProducts = bySlug
+          ? [bySlug]
+          : await tx.product.findMany({
+              where: { name: product.name, categoryId },
+              orderBy: [{ isActive: "desc" }, { id: "asc" }],
+            });
+        const existing = matchingProducts[0];
+        const classification = product.classification;
+        const data = {
+          slug,
+          name: product.name,
+          price: product.price,
+          categoryId,
+          classification,
+          isVegetarian: classification === VEG,
+          subcategory: product.subcategory ?? null,
+          isSignature: product.signature ?? false,
+          comboItems: product.comboItems ?? Prisma.DbNull,
+          isActive: true,
+        };
+
+        const savedProduct = existing
+          ? await tx.product.update({
+              where: { id: existing.id },
+              data,
+            })
+          : await tx.product.create({
+              data,
+            });
+        if (existing) updatedProducts += 1;
+        else createdProducts += 1;
+
+        const duplicateIds = matchingProducts
+          .slice(1)
+          .map((duplicate) => duplicate.id);
+        if (duplicateIds.length) {
+          duplicateCandidates.push({
+            name: product.name,
+            category: product.category,
+            productIds: duplicateIds,
+          });
+          await tx.product.updateMany({
+            where: { id: { in: duplicateIds } },
+            data: { isActive: false },
+          });
+        }
+
+        const variants = product.variants ?? [];
+        for (const variant of variants) {
+          const existingVariant = await tx.productVariant.findUnique({
+            where: {
+              productId_name: {
+                productId: savedProduct.id,
+                name: variant.name,
+              },
+            },
+            select: { id: true },
+          });
+          await tx.productVariant.upsert({
+            where: {
+              productId_name: {
+                productId: savedProduct.id,
+                name: variant.name,
+              },
+            },
+            update: { price: variant.price, isActive: true },
+            create: {
+              productId: savedProduct.id,
+              name: variant.name,
+              price: variant.price,
+            },
+          });
+          if (existingVariant) updatedVariants += 1;
+          else createdVariants += 1;
+        }
+        await tx.productVariant.updateMany({
+          where: {
+            productId: savedProduct.id,
+            ...(variants.length
+              ? { name: { notIn: variants.map((variant) => variant.name) } }
+              : {}),
+          },
+          data: { isActive: false },
         });
-    const existing = matchingProducts[0];
-    const classification = product.classification;
-    const data = {
-      slug,
-      name: product.name,
-      price: product.price,
-      categoryId,
-      classification,
-      isVegetarian: classification === VEG,
-      subcategory: product.subcategory ?? null,
-      isSignature: product.signature ?? false,
-      isActive: true,
-    };
+      }
 
-    const savedProduct = existing
-      ? await prisma.product.update({
-          where: { id: existing.id },
-          data,
-        })
-      : await prisma.product.create({
-          data,
-        });
-    if (existing) updatedProducts += 1;
-    else createdProducts += 1;
-
-    const duplicateIds = matchingProducts
-      .slice(1)
-      .map((duplicate) => duplicate.id);
-    if (duplicateIds.length) {
-      await prisma.product.updateMany({
-        where: { id: { in: duplicateIds } },
+      await tx.product.updateMany({
+        where: { name: { in: legacyVariantNames } },
         data: { isActive: false },
       });
-    }
 
-    const variants = product.variants ?? [];
-    for (const variant of variants) {
-      const existingVariant = await prisma.productVariant.findUnique({
+      const activeMenu = await tx.product.findMany({
         where: {
-          productId_name: { productId: savedProduct.id, name: variant.name },
+          slug: {
+            in: menu.map(
+              (product) =>
+                `${slugify(product.category)}-${slugify(product.name)}`,
+            ),
+          },
+          isActive: true,
         },
-        select: { id: true },
+        include: { category: true, variants: { where: { isActive: true } } },
       });
-      await prisma.productVariant.upsert({
-        where: {
-          productId_name: { productId: savedProduct.id, name: variant.name },
-        },
-        update: { price: variant.price, isActive: true },
-        create: {
-          productId: savedProduct.id,
-          name: variant.name,
-          price: variant.price,
-        },
-      });
-      if (existingVariant) updatedVariants += 1;
-      else createdVariants += 1;
-    }
-    await prisma.productVariant.updateMany({
-      where: {
-        productId: savedProduct.id,
-        ...(variants.length
-          ? { name: { notIn: variants.map((variant) => variant.name) } }
-          : {}),
-      },
-      data: { isActive: false },
-    });
-  }
+      assertMenuMatchesSource(activeMenu);
 
-  await prisma.product.updateMany({
-    where: { name: { in: legacyVariantNames } },
-    data: { isActive: false },
-  });
-
-  const activeMenu = await prisma.product.findMany({
-    where: { slug: { in: menu.map((product) => `${slugify(product.category)}-${slugify(product.name)}`) }, isActive: true },
-    include: { category: true, variants: { where: { isActive: true } } },
-  });
-  const activeVariantCount = activeMenu.reduce(
-    (count, product) => count + product.variants.length,
-    0,
+      return {
+        categoryCount: categoryIds.size,
+        productCount: activeMenu.length,
+        variantCount: activeMenu.reduce(
+          (count, product) => count + product.variants.length,
+          0,
+        ),
+        createdProducts,
+        updatedProducts,
+        createdVariants,
+        updatedVariants,
+        duplicateCandidates,
+      };
+    },
+    {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      maxWait: 10_000,
+      timeout: 120_000,
+    },
+  );
+  await writeMenuImportReport(
+    {
+      createdProducts: importResult.createdProducts,
+      updatedProducts: importResult.updatedProducts,
+      createdVariants: importResult.createdVariants,
+      updatedVariants: importResult.updatedVariants,
+    },
+    importResult.duplicateCandidates,
   );
   console.log(
     JSON.stringify({
-      categoriesPresent: categoryIds.size,
-      menuProductsPresent: activeMenu.length,
-      createdProducts,
-      updatedProducts,
-      activeVariantsPresent: activeVariantCount,
-      createdVariants,
-      updatedVariants,
+      categoriesPresent: importResult.categoryCount,
+      menuProductsPresent: importResult.productCount,
+      createdProducts: importResult.createdProducts,
+      updatedProducts: importResult.updatedProducts,
+      activeVariantsPresent: importResult.variantCount,
+      createdVariants: importResult.createdVariants,
+      updatedVariants: importResult.updatedVariants,
+      duplicateCandidates: importResult.duplicateCandidates.length,
     }),
   );
 }

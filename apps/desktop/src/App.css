@@ -130,6 +130,7 @@ button:disabled { cursor: not-allowed; opacity: .6; }
 .bill-item { padding: 14px 0; border-bottom: 1px solid #f0ece7; }
 .bill-item strong { font-size: 14px; }
 .bill-item span { margin-top: 5px; }
+.combo-item-detail { color: #777; font-size: 10px !important; }
 .bill-total-row { margin-top: auto; padding: 18px 0; font-size: 14px; }
 .bill-total-row strong { font-size: 27px; color: #171a1f; }
 .action-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
@@ -193,38 +194,40 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   text-align: center;
 }
 .receipt-header {
-  position: relative;
-  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-right: 0;
+  padding-left: 6px;
+  min-height: 62px;
 }
 .receipt-logo {
   position: relative;
   z-index: 0;
   display: block;
-  width: min(55mm, 100%);
-  max-height: 30mm;
+  width: min(44mm, 100%);
+  max-height: 26mm;
   height: auto;
   object-fit: contain;
-  margin: 0 auto 8px;
+  margin: 0 auto 6px;
 }
 .receipt-header h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 800;
-  line-height: 1.2;
+  line-height: 1.15;
   letter-spacing: .02em;
   overflow-wrap: anywhere;
   white-space: pre-line;
 }
 .receipt-parcel {
-  position: absolute;
-  top: 8px;
-  right: 2px;
-  width: 118px;
-  height: 62px;
+  align-self: flex-end;
+  width: 11mm;
+  height: 7mm;
+  margin-top: 3px;
   background: url("/parcel-stamp.png") center / contain no-repeat;
   color: transparent;
   font-size: 0;
-  z-index: 2;
   transform: rotate(8deg);
   pointer-events: none;
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, .12));
@@ -300,6 +303,13 @@ input:focus, select:focus { border-color: #d4a24c; box-shadow: 0 0 0 3px rgba(21
   font-size: 10px;
   font-weight: 700;
 }
+.receipt-combo-component {
+  padding-top: 2px;
+  padding-bottom: 2px;
+  color: #555;
+  font-size: 9px;
+}
+.receipt-combo-component > :first-child { padding-left: 6px; }
 .receipt-item-name {
   min-width: 0;
   overflow-wrap: anywhere;

@@ -17,15 +17,7 @@ const sourceSchema = new Map([
     [
       "id", "slug", "name", "description", "price", "isVegetarian",
       "classification", "subcategory", "isSignature", "isActive",
-      "stock", "stockUnit", "lowStockThreshold", "lastStockUpdatedAt",
       "createdAt", "updatedAt", "categoryId",
-    ],
-  ],
-  [
-    "ProductStockMovement",
-    [
-      "id", "productId", "movementType", "quantity", "previousStock",
-      "newStock", "reason", "createdAt",
     ],
   ],
   [
@@ -162,18 +154,183 @@ test("migration endpoints only allow isolated loopback test databases", () => {
   );
 });
 
-test("stock-removal migration remains present and automatic migrations are blocked", () => {
-  const migrationFile = require("node:path").resolve(
-    __dirname,
-    "../prisma/migrations/20261020101500_remove_product_stock/migration.sql",
+test("stock-removal migration requires matching successful ledger evidence", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const { createHash } = require("node:crypto");
+  const migrationsDirectory = path.resolve(__dirname, "../prisma/migrations");
+  const migrationFile = path.join(
+    migrationsDirectory,
+    "20261020101500_remove_product_stock",
+    "migration.sql",
   );
-  assert.equal(require("node:fs").existsSync(migrationFile), true);
+  const checksum = createHash("sha256")
+    .update(fs.readFileSync(migrationFile))
+    .digest("hex");
+  const movementFile = path.join(
+    migrationsDirectory,
+    "20261013213000_add_product_stock_movements",
+    "migration.sql",
+  );
+  const movementChecksum = createHash("sha256")
+    .update(fs.readFileSync(movementFile))
+    .digest("hex");
+
+  assert.throws(
+    () => assertSafeMigrationSet(migrationsDirectory),
+    /not recorded as successfully applied/,
+  );
   assert.throws(
     () =>
-      assertSafeMigrationSet(
-        require("node:path").resolve(__dirname, "../prisma/migrations"),
-      ),
-    /20261020(?:100000|101500)_remove_product_stock removes product inventory/,
+      assertSafeMigrationSet(migrationsDirectory, [
+        {
+          migration_name: "20261020101500_remove_product_stock",
+          checksum,
+          finished_at: null,
+          rolled_back_at: null,
+        },
+      ]),
+    /not recorded as successfully applied/,
+  );
+  assert.doesNotThrow(() =>
+    assertSafeMigrationSet(migrationsDirectory, [
+      {
+        migration_name: "20261020101500_remove_product_stock",
+        checksum,
+        finished_at: new Date(),
+        rolled_back_at: null,
+      },
+      {
+        migration_name: "20261013213000_add_product_stock_movements",
+        checksum: movementChecksum,
+        finished_at: new Date(),
+        rolled_back_at: null,
+        product_stock_movement_exists: false,
+      },
+    ]),
+  );
+  assert.throws(
+    () =>
+      assertSafeMigrationSet(migrationsDirectory, [
+        {
+          migration_name: "20261020101500_remove_product_stock",
+          checksum,
+          finished_at: new Date(),
+          rolled_back_at: null,
+        },
+        {
+          migration_name: "20261013213000_add_product_stock_movements",
+          checksum: "invalid",
+          finished_at: new Date(),
+          rolled_back_at: null,
+        },
+      ]),
+    /20261013213000_add_product_stock_movements has an unrecognized or unsuccessful ledger entry/,
+  );
+  assert.throws(
+    () =>
+      assertSafeMigrationSet(migrationsDirectory, [
+        {
+          migration_name: "20261020101500_remove_product_stock",
+          checksum,
+          finished_at: new Date(),
+          rolled_back_at: null,
+          product_stock_movement_exists: true,
+        },
+      ]),
+    /is absent from history but its table already exists/,
+  );
+  assert.throws(
+    () =>
+      assertSafeMigrationSet(migrationsDirectory, [
+        {
+          migration_name: "20261020101500_remove_product_stock",
+          checksum: "invalid",
+          finished_at: new Date(),
+          rolled_back_at: null,
+        },
+      ]),
+    /not recorded as successfully applied/,
+  );
+  assert.throws(
+    () =>
+      assertSafeMigrationSet(migrationsDirectory, [
+        {
+          migration_name: "20261020100000_remove_product_stock",
+          checksum,
+          finished_at: new Date(),
+          rolled_back_at: null,
+        },
+      ]),
+    /unsupported migration alias 20261020100000_remove_product_stock/,
+  );
+});
+
+test("migration guard accepts reviewed restore and combo migrations but rejects unknown migrations", (context) => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const { createHash } = require("node:crypto");
+  const fixtureRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "bigbites-reviewed-migrations-"),
+  );
+  const migrationsDirectory = path.join(fixtureRoot, "migrations");
+  fs.mkdirSync(migrationsDirectory);
+  context.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const sourceMigrationsDirectory = path.resolve(
+    __dirname,
+    "../prisma/migrations",
+  );
+  for (const entry of fs.readdirSync(sourceMigrationsDirectory, {
+    withFileTypes: true,
+  })) {
+    if (!entry.isDirectory()) continue;
+    const destination = path.join(migrationsDirectory, entry.name);
+    fs.mkdirSync(destination);
+    fs.copyFileSync(
+      path.join(sourceMigrationsDirectory, entry.name, "migration.sql"),
+      path.join(destination, "migration.sql"),
+    );
+  }
+  fs.writeFileSync(
+    path.join(migrationsDirectory, "migration_lock.toml"),
+    'provider = "postgresql"',
+  );
+  fs.copyFileSync(
+    path.resolve(__dirname, "../prisma/schema.prisma"),
+    path.join(fixtureRoot, "schema.prisma"),
+  );
+
+  const removalMigration = fs.readFileSync(
+    path.join(
+      migrationsDirectory,
+      "20261020101500_remove_product_stock",
+      "migration.sql",
+    ),
+  );
+  const checksum = createHash("sha256").update(removalMigration).digest("hex");
+  const appliedHistory = [
+    {
+      migration_name: "20261020101500_remove_product_stock",
+      checksum,
+      finished_at: new Date(),
+      rolled_back_at: null,
+    },
+  ];
+  assert.doesNotThrow(() =>
+    assertSafeMigrationSet(migrationsDirectory, appliedHistory),
+  );
+
+  const unknownMigration = path.join(
+    migrationsDirectory,
+    "20261029999999_unreviewed",
+  );
+  fs.mkdirSync(unknownMigration);
+  fs.writeFileSync(path.join(unknownMigration, "migration.sql"), "SELECT 1;");
+  assert.throws(
+    () => assertSafeMigrationSet(migrationsDirectory, appliedHistory),
+    /unreviewed directories: .*20261029999999_unreviewed/,
   );
 });
 
@@ -237,7 +394,8 @@ test("automatic migration is blocked when renamed SQL drops stock history", (con
       (entry) =>
         entry.isDirectory() &&
         entry.name !== "20261020101500_remove_product_stock" &&
-        entry.name !== "20261020100000_remove_product_stock",
+        entry.name !== "20261020100000_remove_product_stock" &&
+        entry.name !== "20261027210000_restore_product_inventory",
     )
     .map((entry) => entry.name)) {
     const migrationDirectory = path.join(migrationsDirectory, migration);
@@ -283,7 +441,7 @@ test("automatic migration is blocked when renamed SQL drops stock history", (con
   );
   assert.throws(
     () => assertSafeMigrationSet(migrationsDirectory),
-    /unreviewed directories: 20261099999999_renamed_change/,
+    /unreviewed directories: .*20261099999999_renamed_change/,
   );
 });
 
@@ -321,6 +479,11 @@ test("automatic migration entry points run preflight before deploy", () => {
     canonicalStartup.indexOf("assertSafeMigrationSet(") <
       canonicalStartup.indexOf('"migrate", "deploy"'),
   );
+  assert.match(canonicalStartup, /BEGIN READ ONLY/);
+  assert.match(canonicalStartup, /20261020101500_remove_product_stock/);
+  assert.match(canonicalStartup, /20261020100000_remove_product_stock/);
+  assert.match(canonicalStartup, /20261013213000_add_product_stock_movements/);
+  assert.match(canonicalStartup, /product_stock_movement_exists/);
   assert.ok(
     standaloneStartup.indexOf("inventoryRemovalMigration") <
       standaloneStartup.indexOf('"migrate", "deploy"'),
@@ -331,7 +494,7 @@ test("automatic migration entry points run preflight before deploy", () => {
   assert.ok(installerGuard < installer.indexOf("migrate deploy"));
   assert.match(
     installer,
-    /\$databaseName\s*=\s*"bigbites_client_local"[\s\S]*?function Assert-FreshDatabaseMigrationGate[\s\S]*?\$DatabaseCreatedByAttempt[\s\S]*?\$databaseStateParts\[4\]\s*-notin\s*@\("absent",\s*"present"\)/,
+    /\$databaseName\s*=\s*"bigbites_client_local_delivery_20261027"[\s\S]*?function Assert-FreshDatabaseMigrationGate[\s\S]*?\$DatabaseCreatedByAttempt[\s\S]*?\$databaseStateParts\[4\]\s*-notin\s*@\("absent",\s*"present"\)/,
   );
   assert.ok(
     installer.indexOf("Assert-FreshDatabaseMigrationGate `") <
@@ -345,17 +508,12 @@ test("automatic migration entry points run preflight before deploy", () => {
   );
 });
 
-test("source schema fixture retains inventory columns and movement history", () => {
+test("source schema fixture requires POS data without inventory tables", () => {
   assert.doesNotThrow(() => validateSourceSchema(sourceSchema));
-  for (const column of [
-    "stock",
-    "stockUnit",
-    "lowStockThreshold",
-    "lastStockUpdatedAt",
-  ]) {
-    assert.equal(sourceSchema.get("Product").has(column), true);
+  for (const column of ["stock", "stockUnit", "lowStockThreshold", "lastStockUpdatedAt"]) {
+    assert.equal(sourceSchema.get("Product").has(column), false);
   }
-  assert.equal(sourceSchema.has("ProductStockMovement"), true);
+  assert.equal(sourceSchema.has("ProductStockMovement"), false);
 
   const missingTable = new Map(sourceSchema);
   missingTable.delete("OrderItem");
@@ -386,8 +544,34 @@ test("source schema fixture retains inventory columns and movement history", () 
 
   assert.doesNotThrow(
     () => validateSourceSchema(sourceSchema),
-    "legacy inventory columns and movement tables are not required for POS data import",
+    "inventory columns and movement tables are not part of the POS data model",
   );
+});
+
+test("inventory migration leaves existing products uninitialized until an owner enters counts", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const migration = fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "../prisma/migrations/20261027210000_restore_product_inventory/migration.sql",
+    ),
+    "utf8",
+  );
+
+  assert.match(
+    migration,
+    /ADD COLUMN IF NOT EXISTS "stock" INTEGER NOT NULL DEFAULT 0/i,
+  );
+  assert.match(
+    migration,
+    /ADD COLUMN IF NOT EXISTS "lastStockUpdatedAt" TIMESTAMP\(3\);/i,
+  );
+  assert.doesNotMatch(
+    migration,
+    /ADD COLUMN IF NOT EXISTS "lastStockUpdatedAt"[^;]*\bNOT NULL\b/i,
+  );
+  assert.doesNotMatch(migration, /\bUPDATE\s+"Product"\b/i);
 });
 
 test("row comparison and money aggregation are exact", () => {

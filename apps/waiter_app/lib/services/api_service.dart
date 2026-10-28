@@ -373,6 +373,7 @@ class ApiService {
   static Future<Map<String, dynamic>> addItemsToOrder({
     required int orderId,
     required List<Map<String, dynamic>> items,
+    required String idempotencyKey,
     required String token,
   }) async {
     final response = await http.patch(
@@ -380,6 +381,7 @@ class ApiService {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $token',
+        'Idempotency-Key': idempotencyKey,
       },
       body: jsonEncode({'items': items}),
     );
