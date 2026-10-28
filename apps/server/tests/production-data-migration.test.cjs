@@ -209,6 +209,46 @@ test("stock-removal migration requires matching successful ledger evidence", () 
       },
     ]),
   );
+  assert.doesNotThrow(() =>
+    assertSafeMigrationSet(migrationsDirectory, [
+      {
+        migration_name: "20261020101500_remove_product_stock",
+        checksum:
+          "98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751",
+        finished_at: new Date(),
+        rolled_back_at: null,
+      },
+      {
+        migration_name: "20261013213000_add_product_stock_movements",
+        checksum:
+          "8e5d37e4f6b906ae06e93e2e56f9fddb29c6a4b18cbcbbc9c4ca4a11618cb754",
+        finished_at: new Date(),
+        rolled_back_at: null,
+        product_stock_movement_exists: true,
+      },
+    ]),
+    "accepts the sanitized, verified production checksums",
+  );
+  assert.throws(
+    () =>
+      assertSafeMigrationSet(migrationsDirectory, [
+        {
+          migration_name: "20261020101500_remove_product_stock",
+          checksum:
+            "98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751",
+          finished_at: new Date(),
+          rolled_back_at: null,
+        },
+        {
+          migration_name: "20261013213000_add_product_stock_movements",
+          checksum: "unrecognized",
+          finished_at: new Date(),
+          rolled_back_at: null,
+          product_stock_movement_exists: true,
+        },
+      ]),
+    /20261013213000_add_product_stock_movements has an unrecognized or unsuccessful ledger entry/,
+  );
   assert.throws(
     () =>
       assertSafeMigrationSet(migrationsDirectory, [

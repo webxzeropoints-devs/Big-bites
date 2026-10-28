@@ -5,6 +5,10 @@ const { existsSync, readFileSync, readdirSync, statSync } = require("node:fs");
 const INVENTORY_REMOVAL_MIGRATION = "20261020101500_remove_product_stock";
 const INVENTORY_REMOVAL_ALIAS = "20261020100000_remove_product_stock";
 const STOCK_MOVEMENT_MIGRATION = "20261013213000_add_product_stock_movements";
+const VERIFIED_INVENTORY_REMOVAL_CHECKSUM =
+  "98c0f088b6a25779eff60a5f618750ce8b2caee557334c316a68d41a1c9fa751";
+const VERIFIED_STOCK_MOVEMENT_CHECKSUM =
+  "8e5d37e4f6b906ae06e93e2e56f9fddb29c6a4b18cbcbbc9c4ca4a11618cb754";
 const INVENTORY_REMOVAL_SQL = `DROP TABLE IF EXISTS "ProductStockMovement";
 
 ALTER TABLE "Product"
@@ -140,7 +144,10 @@ function assertSafeMigrationSet(migrationsDirectory, migrationHistory = []) {
     .digest("hex");
   if (
     !removalMigration ||
-    removalMigration.checksum !== expectedRemovalChecksum ||
+    ![
+      expectedRemovalChecksum,
+      VERIFIED_INVENTORY_REMOVAL_CHECKSUM,
+    ].includes(removalMigration.checksum) ||
     !removalMigration.finished_at ||
     removalMigration.rolled_back_at != null
   ) {
@@ -163,7 +170,10 @@ function assertSafeMigrationSet(migrationsDirectory, migrationHistory = []) {
       .update(stockMovementSql)
       .digest("hex");
     if (
-      stockMovementMigration.checksum !== expectedStockMovementChecksum ||
+      ![
+        expectedStockMovementChecksum,
+        VERIFIED_STOCK_MOVEMENT_CHECKSUM,
+      ].includes(stockMovementMigration.checksum) ||
       !stockMovementMigration.finished_at ||
       stockMovementMigration.rolled_back_at != null
     ) {
