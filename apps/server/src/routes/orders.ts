@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { createHash } from "node:crypto";
 import { prisma } from "../config/database.js";
 import { requireRoles } from "../middleware/auth.js";
 import { calculateGstAmounts } from "../utils/gst.js";
@@ -7,6 +8,7 @@ import {
   multiplyMinorUnits,
   toMinorUnits,
 } from "../utils/currency.js";
+import { calculateOrderAmounts } from "../utils/financial.js";
 import {
   lockOrderSequence,
   resetOrderSequenceIfEmpty,
@@ -22,6 +24,16 @@ const safeWaiterSelect = {
   createdAt: true,
   updatedAt: true,
 };
+
+function canAddItemsToOrder(
+  orderStatus: string,
+  paymentStatus?: string | null,
+): boolean {
+  const isActiveOrder =
+    orderStatus === "CONFIRMED" || orderStatus === "READY_FOR_BILLING";
+  const isUnpaid = paymentStatus !== "PAID" && paymentStatus !== "REFUNDED";
+  return isActiveOrder && isUnpaid;
+}
 
 class OrderRequestError extends Error {
   constructor(
@@ -388,6 +400,11 @@ router.patch(
         });
       }
 
+      const idempotencyKey = req.get("Idempotency-Key")?.trim() || null;
+      if (idempotencyKey && idempotencyKey.length > 128) {
+        return res.status(400).json({ message: "Invalid idempotency key" });
+      }
+
       const order = await prisma.order.findUnique({
         where: {
           id: orderId,
@@ -412,12 +429,9 @@ router.patch(
         });
       }
 
-      const canAddItems =
-        order.status === "CONFIRMED" || order.status === "READY_FOR_BILLING";
-
-      if (!canAddItems || order.payment?.status === "PAID") {
+      if (!canAddItemsToOrder(order.status, order.payment?.status)) {
         return res.status(400).json({
-          message: "Items can only be added before the order is paid",
+          message: "Items can only be added before payment is completed",
         });
       }
 
@@ -493,15 +507,47 @@ router.patch(
           );
         }
 
-        const canAddItems =
-          currentOrder.status === "CONFIRMED" ||
-          currentOrder.status === "READY_FOR_BILLING";
-
-        if (!canAddItems || currentOrder.payment?.status === "PAID") {
+        if (!canAddItemsToOrder(currentOrder.status, currentOrder.payment?.status)) {
           throw new OrderRequestError(
             400,
-            "Items can only be added before the order is paid",
+            "Items can only be added before payment is completed",
           );
+        }
+
+        const requestHash = createHash("sha256")
+          .update(
+            JSON.stringify(
+              [...productQuantities.values()].sort(
+                (left, right) =>
+                  left.productId - right.productId ||
+                  (left.variantId ?? 0) - (right.variantId ?? 0),
+              ),
+            ),
+          )
+          .digest("hex");
+        if (idempotencyKey) {
+          const previousSubmission = await tx.orderItemSubmission.findUnique({
+            where: {
+              orderId_idempotencyKey: { orderId, idempotencyKey },
+            },
+          });
+          if (previousSubmission) {
+            if (previousSubmission.requestHash !== requestHash) {
+              throw new OrderRequestError(
+                409,
+                "This idempotency key was already used for different items",
+              );
+            }
+            return tx.order.findUnique({
+              where: { id: orderId },
+              include: {
+                items: { include: { product: true, variant: true } },
+                table: true,
+                waiter: { select: safeWaiterSelect },
+                payment: true,
+              },
+            });
+          }
         }
 
         const newItems: {
@@ -572,6 +618,15 @@ router.patch(
           0n,
         );
         const additionalTotal = toDecimalString(additionalTotalMinor);
+        const updatedSubtotal = toDecimalString(
+          toMinorUnits(String(currentOrder.total)) + additionalTotalMinor,
+        );
+        const updatedAmounts = calculateOrderAmounts({
+          total: updatedSubtotal,
+          gstRate: currentOrder.gstEnabled ? currentOrder.gstRate : 0,
+          discountType: currentOrder.discountType,
+          discountValue: currentOrder.discountValue,
+        });
 
         await tx.orderItem.createMany({
           data: newItems.map((item) => ({
@@ -583,20 +638,28 @@ router.patch(
         await tx.payment.updateMany({
           where: { orderId },
           data: {
-            amount: {
-              increment: additionalTotal,
-            },
+            amount:
+              currentOrder.status === "READY_FOR_BILLING"
+                ? toDecimalString(toMinorUnits(updatedAmounts.grandTotal))
+                : updatedSubtotal,
           },
         });
+
+        if (idempotencyKey) {
+          await tx.orderItemSubmission.create({
+            data: { orderId, idempotencyKey, requestHash },
+          });
+        }
 
         return tx.order.update({
           where: {
             id: orderId,
           },
           data: {
-            total: {
-              increment: additionalTotal,
-            },
+            total: updatedSubtotal,
+            discountAmount: toDecimalString(
+              toMinorUnits(updatedAmounts.discountAmount),
+            ),
           },
           include: {
             items: {

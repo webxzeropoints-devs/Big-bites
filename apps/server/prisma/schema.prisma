@@ -143,6 +143,7 @@ model Order {
 
   items   OrderItem[]
   payment Payment?
+  itemSubmissions OrderItemSubmission[]
 }
 
 model RestaurantSettings {
@@ -174,6 +175,16 @@ model OrderItem {
   variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   @@index([variantId])
+}
+
+model OrderItemSubmission {
+  idempotencyKey String
+  requestHash    String
+  createdAt      DateTime @default(now())
+  orderId        Int
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@id([orderId, idempotencyKey])
 }
 
 model Payment {
