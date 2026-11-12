@@ -1,0 +1,16 @@
+﻿{
+    "runId":  "20261026-1730-node-runtime-fix",
+    "installer":  "C:\\Installer\\Big Bites Restaurant_0.1.0_x64-setup.exe",
+    "startedAt":  "2026-10-26T17:52:57.6825836+05:30",
+    "installerExitCode":  null,
+    "setupLogCopied":  true,
+    "postgresService":  "NotChecked",
+    "postgresStartMode":  "NotChecked",
+    "backendTaskPresent":  false,
+    "backendHealth":  "NotChecked",
+    "desktopProcessPresent":  false,
+    "postReboot":  null,
+    "passedInitialChecks":  false,
+    "setupStage":  "installer-running",
+    "setupElapsedSeconds":  106
+}

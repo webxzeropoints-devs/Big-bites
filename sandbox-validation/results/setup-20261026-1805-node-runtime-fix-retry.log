@@ -1,0 +1,29 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20261026180540
+Username: 5DABCD6F-99E7-4\WDAGUtilityAccount
+RunAs User: 5DABCD6F-99E7-4\WDAGUtilityAccount
+Configuration Name: 
+Machine: 5DABCD6F-99E7-4 (Microsoft Windows NT 10.0.26100.0)
+Host Application: C:\Windows\system32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\Program Files\Big Bites Restaurant\resources\windows\Install-BigBites.ps1 -InstallDir C:\Program Files\Big Bites Restaurant -ServerSourcePath C:\Program Files\Big Bites Restaurant\resources\server -LogPath C:\Users\WDAGUtilityAccount\AppData\Local\Temp\BIG-BITES-POS-setup.log
+Process ID: 2372
+PSVersion: 5.1.26100.9711
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9711
+BuildVersion: 10.0.26100.9711
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Install directory: C:\Program Files\Big Bites Restaurant
+Server resources: C:\Program Files\Big Bites Restaurant\resources\server
+Installer log: C:\Users\WDAGUtilityAccount\AppData\Local\Temp\BIG-BITES-POS-setup.log
+The bundled private Node.js runtime is ready.
+PostgreSQL not found. Installing the signed official PostgreSQL package...
+PS>TerminatingError(Get-NetTCPConnection): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop: No matching MSFT_NetTCPConnection objects found by CIM query for instances of the ROOT/StandardCimv2/MSFT_NetTCPConnection class on the  CIM server: SELECT * FROM MSFT_NetTCPConnection  WHERE ((LocalPort = 5432)) AND ((State = 2)). Verify query parameters and retry."
+The Windows TCP endpoint query failed; checking port 5432 with netstat.exe.
+Downloading the official PostgreSQL 17.11 installer to a unique temporary directory...
+PostgreSQL download progress: 52,434,044 of 413,001,200 bytes.
+PostgreSQL download progress: 104,872,286 of 413,001,200 bytes.
+PostgreSQL download progress: 157,296,950 of 413,001,200 bytes.

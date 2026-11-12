@@ -1,0 +1,14 @@
+﻿{
+    "runId":  "20261026-131621",
+    "installer":  "C:\\Installer\\Big Bites Restaurant_0.1.0_x64-setup.exe",
+    "startedAt":  "2026-10-26T13:16:21.5796735+05:30",
+    "installerExitCode":  null,
+    "setupLogCopied":  false,
+    "postgresService":  "NotChecked",
+    "postgresStartMode":  "NotChecked",
+    "backendTaskPresent":  false,
+    "backendHealth":  "NotChecked",
+    "desktopProcessPresent":  false,
+    "postReboot":  null,
+    "passedInitialChecks":  false
+}

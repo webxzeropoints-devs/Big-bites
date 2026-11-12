@@ -1,0 +1,17 @@
+﻿{
+    "runId":  "20261026-132425",
+    "installer":  "C:\\Installer\\Big Bites Restaurant_0.1.0_x64-setup.exe",
+    "startedAt":  "2026-10-26T13:24:25.7464712+05:30",
+    "installerExitCode":  2,
+    "setupLogCopied":  true,
+    "postgresService":  "NotChecked",
+    "postgresStartMode":  "NotChecked",
+    "backendTaskPresent":  false,
+    "backendHealth":  "NotChecked",
+    "desktopProcessPresent":  false,
+    "postReboot":  null,
+    "passedInitialChecks":  false,
+    "setupStage":  "installer-exited",
+    "setupElapsedSeconds":  1967,
+    "failure":  "The installer returned exit code 2."
+}

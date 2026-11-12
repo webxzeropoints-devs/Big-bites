@@ -1,0 +1,22 @@
+<Configuration>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\vjsan\hotel-pos\release-candidates\installer-fix-20261026-1252\tauri-target\release\bundle\nsis</HostFolder>
+      <SandboxFolder>C:\Installer</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\vjsan\hotel-pos\sandbox-validation\results</HostFolder>
+      <SandboxFolder>C:\TestOut</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\vjsan\hotel-pos\sandbox-validation\scripts</HostFolder>
+      <SandboxFolder>C:\TestScripts</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\TestScripts\Run-BigBitesSandboxTest.ps1</Command>
+  </LogonCommand>
+</Configuration>

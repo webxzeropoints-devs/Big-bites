@@ -1,0 +1,6 @@
+installerExitCode=timed-out
+postgresqlService=not-checked
+backendHealth=not-checked
+desktopProcess=not-checked
+setupLogPresent=False
+failure=The candidate installer did not finish within 25 minutes.

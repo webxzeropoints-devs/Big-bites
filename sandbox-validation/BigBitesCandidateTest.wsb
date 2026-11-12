@@ -1,0 +1,17 @@
+<Configuration>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\vjsan\hotel-pos\release-candidates\installer-fix-20261026-1511-inventory-retry-safe\tauri-target\release\bundle\nsis</HostFolder>
+      <SandboxFolder>C:\Installer</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\Users\vjsan\hotel-pos\sandbox-validation</HostFolder>
+      <SandboxFolder>C:\TestOut</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\TestOut\RunCandidateValidation.ps1</Command>
+  </LogonCommand>
+</Configuration>
